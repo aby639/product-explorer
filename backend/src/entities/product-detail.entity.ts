@@ -1,0 +1,25 @@
+import { Column, Entity, JoinColumn, OneToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { Product } from './product.entity';
+
+@Entity()
+export class ProductDetail {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @OneToOne(() => Product, (p) => p.detail, { onDelete: 'CASCADE' })
+  @JoinColumn()
+  product!: Product;
+
+  @Column({ type: 'text', nullable: true })
+  description?: string | null;
+
+  @Column({ type: 'float', nullable: true })
+  ratingAverage?: number | null;
+
+  // 👇 NEW: flexible JSON bag for extras (recommendations, specs, etc.)
+  @Column({ type: 'jsonb', nullable: true, default: () => `'{}'::jsonb` })
+  specs?: Record<string, any> | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastScrapedAt?: Date | null;
+}

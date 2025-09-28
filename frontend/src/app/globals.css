@@ -1,0 +1,100 @@
+/* Tailwind v4 */
+@import "tailwindcss";
+
+@layer theme, base, components, utilities;
+
+/* ========== THEME ========== */
+@layer theme {
+  :root {
+    --font-inter: ui-sans-serif, system-ui, -apple-system, "Inter", "Segoe UI", Roboto, Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  }
+}
+
+/* ========== BASE ========== */
+@layer base {
+  html, body { height: 100%; }
+  body {
+    @apply bg-[#0b0e13] text-slate-100 antialiased;
+    font-family: var(--font-inter);
+  }
+  a { @apply underline-offset-2 decoration-slate-400/40 hover:decoration-slate-200 transition; }
+}
+
+/* ========== COMPONENTS ========== */
+@layer components {
+  .container-xl { @apply mx-auto max-w-6xl px-5; }
+  .card { @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm shadow-[0_6px_30px_-12px_rgba(0,0,0,.6)]; }
+  .btn { @apply inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm hover:bg-white/15 active:bg-white/20 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40; }
+  .btn-primary { @apply border-emerald-400/30 bg-emerald-400/15 hover:bg-emerald-400/25; }
+  .badge { @apply rounded-full border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] uppercase tracking-wide; }
+  .section-title { @apply text-3xl font-bold tracking-tight; }
+  .section-head { @apply flex items-center justify-between gap-3; }
+  .skeleton { @apply animate-pulse rounded-lg bg-white/10; }
+}
+
+/* ========== UTILITIES ========== */
+@layer utilities {
+  .bg-canvas {
+    background-image:
+      radial-gradient(60% 80% at 50% 0%, #1A2235 0%, transparent 70%),
+      linear-gradient(180deg, #0B0E13 0%, #0B0E13 40%, #081018 100%);
+  }
+  .bg-grid {
+    background-image:
+      linear-gradient(#ffffff0f 1px, transparent 1px),
+      linear-gradient(90deg, #ffffff0f 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+  /* subtle hover glow for cards */
+  .card-hover { @apply transition hover:shadow-[0_0_0_1px_rgba(255,255,255,.08),0_24px_60px_-30px_rgba(0,0,0,.7)]; }
+}
+
+/* ======== UI polish add-ons ======== */
+
+/* nicer header shadow when page scrolls a bit (use on header if you want) */
+.sticky-shadow {
+  box-shadow: 0 10px 30px -20px rgba(0,0,0,.8);
+}
+
+/* ghost / muted button variants */
+.btn-ghost { @apply border-transparent bg-transparent hover:bg-white/5; }
+.btn-muted { @apply border-white/10 bg-white/5 hover:bg-white/10; }
+
+/* tiny rounded chips for meta info */
+.chip { @apply inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[12px]; }
+
+/* make product cards pop just a bit more on hover (pairs with .card-hover) */
+.card-raise { @apply transition-transform duration-300 hover:-translate-y-0.5; }
+
+/* clamp long titles consistently */
+.title-2clamp { @apply line-clamp-2; }
+.title-3clamp { @apply line-clamp-3; }
+
+/* subtle focus ring for clickable tiles */
+.tile { @apply rounded-xl border border-white/10 bg-white/5 transition hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/30; }
+
+/* thin, modern scrollbars (affects overflow-x lists like the hero rail) */
+@layer base {
+  * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.18) transparent; }
+  *::-webkit-scrollbar { height: 10px; width: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.18);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.28); }
+}
+
+/* horizontal fade mask helper (great for scroll rails) */
+.mask-fade-x {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 32px, #000 calc(100% - 32px), transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 32px, #000 calc(100% - 32px), transparent 100%);
+}
+
+/* tiny text utility that stays readable on dark */
+.text-muted { @apply opacity-75; }
+
+/* elevated ring for important cards */
+.ring-card { @apply ring-1 ring-white/10; }

@@ -1,0 +1,28 @@
+﻿# OS/IDE
+.DS_Store
+.vscode/
+*.log
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-lock.yaml
+yarn.lock
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+coverage/
+.next/
+.next.cache/
+.out/
+.vercel/
+
+# Misc
+tmp/
+.cache/

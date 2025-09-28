@@ -1,0 +1,25 @@
+// Barrel exports
+export * from './navigation.entity';
+export * from './category.entity';
+export * from './product.entity';
+export * from './product-detail.entity';
+export * from './review.entity';
+export * from './view-history.entity';
+
+// IMPORTANT: make ENTITIES a mutable array with the expected type
+import { EntitySchema } from 'typeorm';
+import { Navigation } from './navigation.entity';
+import { Category } from './category.entity';
+import { Product } from './product.entity';
+import { ProductDetail } from './product-detail.entity';
+import { Review } from './review.entity';
+import { ViewHistory } from './view-history.entity';
+
+export const ENTITIES: (Function | string | EntitySchema<any>)[] = [
+  Navigation,
+  Category,
+  Product,
+  ProductDetail,
+  Review,
+  ViewHistory,
+];
