@@ -1,8 +1,27 @@
 import Link from 'next/link'
 
-type Recommendation = { href: string; title?: string | null; price?: number | null; currency?: string | null; sourceId?: string | null }
-type ProductDetail = { description?: string | null; ratingAverage?: number | null; lastScrapedAt?: string | null; specs?: { recommendations?: Recommendation[]; [k: string]: any } | null }
-type Product = { id: string; title: string; image?: string | null; price?: number | null; currency?: string | null; sourceUrl?: string | null; detail?: ProductDetail | null }
+type Recommendation = {
+  href: string
+  title?: string | null
+  price?: number | null
+  currency?: string | null
+  sourceId?: string | null
+}
+type ProductDetail = {
+  description?: string | null
+  ratingAverage?: number | null
+  lastScrapedAt?: string | null
+  specs?: { recommendations?: Recommendation[]; [k: string]: any } | null
+}
+type Product = {
+  id: string
+  title: string
+  image?: string | null
+  price?: number | null
+  currency?: string | null
+  sourceUrl?: string | null
+  detail?: ProductDetail | null
+}
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
 export const dynamic = 'force-dynamic'
@@ -10,13 +29,21 @@ export const dynamic = 'force-dynamic'
 function money(v?: number | null, c?: string | null) {
   if (v == null || !c) return null
   try {
-    return new Intl.NumberFormat(c === 'GBP' ? 'en-GB' : c === 'EUR' ? 'de-DE' : 'en-US', { style: 'currency', currency: c }).format(v)
-  } catch { return `${Number(v)} ${c}` }
+    return new Intl.NumberFormat(
+      c === 'GBP' ? 'en-GB' : c === 'EUR' ? 'de-DE' : 'en-US',
+      { style: 'currency', currency: c },
+    ).format(v)
+  } catch {
+    return `${Number(v)} ${c}`
+  }
 }
 
 async function getProduct(id: string, refresh?: boolean): Promise<Product | null> {
   const qs = refresh ? '?refresh=true' : ''
-  const res = await fetch(`${API}/products/${encodeURIComponent(id)}${qs}`, { next: { revalidate: 0 }, cache: 'no-store' })
+  const res = await fetch(`${API}/products/${encodeURIComponent(id)}${qs}`, {
+    next: { revalidate: 0 },
+    cache: 'no-store',
+  })
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`Failed to load product (${res.status}).`)
   const text = await res.text()
@@ -24,15 +51,26 @@ async function getProduct(id: string, refresh?: boolean): Promise<Product | null
   return JSON.parse(text)
 }
 
-export default async function ProductPage({ params, searchParams }: { params: { id: string }, searchParams: { refresh?: string } }) {
-  const { id } = params
-  const refresh = searchParams?.refresh === 'true'
+// NOTE: Next.js 15: params/searchParams are Promises
+export default async function ProductPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>
+  searchParams?: Promise<{ refresh?: string }>
+}) {
+  const { id } = await params
+  const sp = searchParams ? await searchParams : undefined
+  const refresh = sp?.refresh === 'true'
+
   const product = await getProduct(id, refresh)
 
   if (!product) {
     return (
       <div className="space-y-6">
-        <Link href="/categories/books" className="btn">← Back</Link>
+        <Link href="/categories/books" className="btn">
+          ← Back
+        </Link>
         <h1 className="text-3xl font-semibold">Product not found</h1>
         <p className="opacity-80">It may have been removed or the database was reset.</p>
       </div>
@@ -44,7 +82,9 @@ export default async function ProductPage({ params, searchParams }: { params: { 
 
   return (
     <div className="space-y-6">
-      <Link href="/categories/books" className="btn">← Back</Link>
+      <Link href="/categories/books" className="btn">
+        ← Back
+      </Link>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
         <div className="card p-3">
@@ -62,7 +102,9 @@ export default async function ProductPage({ params, searchParams }: { params: { 
 
           <div className="flex gap-3">
             {product.sourceUrl ? (
-              <a href={product.sourceUrl} target="_blank" rel="noreferrer" className="btn">View on World of Books</a>
+              <a href={product.sourceUrl} target="_blank" rel="noreferrer" className="btn">
+                View on World of Books
+              </a>
             ) : (
               <div className="opacity-70 text-sm">No source URL</div>
             )}
@@ -78,7 +120,9 @@ export default async function ProductPage({ params, searchParams }: { params: { 
             </div>
             <div className="mt-3 flex items-center gap-3 text-xs opacity-70">
               {product.detail?.ratingAverage != null && <span>Rating: {product.detail.ratingAverage}</span>}
-              {product.detail?.lastScrapedAt && <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>}
+              {product.detail?.lastScrapedAt && (
+                <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+              )}
             </div>
           </div>
 
@@ -88,7 +132,9 @@ export default async function ProductPage({ params, searchParams }: { params: { 
               <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {recs.map((rec, i) => (
                   <li key={rec.sourceId ?? rec.href ?? i} className="card card-hover p-3">
-                    <a className="underline" href={rec.href} target="_blank" rel="noreferrer">{rec.title || rec.href}</a>
+                    <a className="underline" href={rec.href} target="_blank" rel="noreferrer">
+                      {rec.title || rec.href}
+                    </a>
                     {rec.price != null && rec.currency && (
                       <div className="text-xs opacity-80 mt-1">{money(rec.price, rec.currency)}</div>
                     )}
