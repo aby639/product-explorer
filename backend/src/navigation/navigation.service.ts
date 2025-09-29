@@ -16,10 +16,10 @@ export class NavigationService implements OnModuleInit {
     const count = await this.repo.count();
     if (count > 0) return;
 
-    // 👇 use the actual column names from your entity
+    // 👇 use column names from your entity
     const rows: Partial<Navigation>[] = [
-      { navKey: 'books', title: 'Books' },
-      // add more if you want: { navKey: 'games', title: 'Games' },
+      { slug: 'books', title: 'Books' },   // <-- was navKey; must be slug
+      // add more if you want, e.g.: { slug: 'games', title: 'Games' },
     ];
 
     await this.repo.save(rows as Navigation[]);
