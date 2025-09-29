@@ -10,7 +10,7 @@ export class NavigationController {
     return this.navService.findAll();
   }
 
-  // optional: call to re-seed if the table gets wiped
+  // Optional: let you force re-seed if the table ever gets wiped
   @Post('refresh')
   async refresh() {
     await this.navService.ensureSeed();
