@@ -62,4 +62,65 @@ export class ProductsService {
     }
     return product;
   }
+
+  // -------------------------
+  // TEMPORARY: seeding helper
+  // -------------------------
+  async ensureSeedProducts() {
+    // if products already exist, do nothing
+    const existing = await this.repo.count();
+    if (existing > 0) return { inserted: 0, skipped: existing };
+
+    const fiction = await this.cats.findOne({ where: { slug: 'fiction' } });
+    const nonfiction = await this.cats.findOne({ where: { slug: 'non-fiction' } });
+    if (!fiction || !nonfiction) {
+      throw new Error('Seed requires categories "fiction" and "non-fiction".');
+    }
+
+    const defs: Array<Partial<Product>> = [
+      {
+        title: 'The Silent Patient',
+        price: 6.99,
+        currency: 'GBP',
+        sourceUrl:
+          'https://www.worldofbooks.com/en-gb/products/silent-patient-book-alex-michaelides-9781250301697',
+        category: fiction,
+      },
+      {
+        title: 'Us Three',
+        price: 4.99,
+        currency: 'GBP',
+        sourceUrl:
+          'https://www.worldofbooks.com/en-gb/products/us-three-book-ruth-jones-9781784162238',
+        category: fiction,
+      },
+      {
+        title: 'Atomic Habits',
+        price: 7.99,
+        currency: 'GBP',
+        sourceUrl:
+          'https://www.worldofbooks.com/en-gb/products/atomic-habits-an-easy-proven-way-to-build-good-habits-and-break-bad-ones-book-9780593189641',
+        category: nonfiction,
+      },
+      {
+        title: 'Sapiens',
+        price: 8.99,
+        currency: 'GBP',
+        sourceUrl:
+          'https://www.worldofbooks.com/en-gb/products/sapiens-book-yuval-noah-harari-9781784873646',
+        category: nonfiction,
+      },
+      {
+        title: 'Educated',
+        price: 5.99,
+        currency: 'GBP',
+        sourceUrl:
+          'https://www.worldofbooks.com/en-gb/products/educated-book-tara-westover-9781786330512',
+        category: nonfiction,
+      },
+    ];
+
+    await this.repo.save(defs.map(d => this.repo.create(d)));
+    return { inserted: defs.length, skipped: 0 };
+  }
 }
