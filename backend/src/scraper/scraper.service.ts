@@ -57,8 +57,20 @@ export class ScraperService {
 
     this.log.log(`Scraping ${product.sourceUrl}`);
 
-    const browser = await chromium.launch({ headless: true });
+    // ---- IMPORTANT FOR RENDER / PaaS ----
+    // These flags make Chromium start reliably in containerized sandboxes.
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--single-process',
+      '--no-zygote',
+    ];
+
+    let browser: import('playwright').Browser | null = null;
     try {
+      browser = await chromium.launch({ headless: true, args: launchArgs });
+
       // Avoid TS2783: remove UA from device profile, then set ours explicitly
       const { userAgent: _ignored, ...desktopChrome } = devices['Desktop Chrome'];
       const context = await browser.newContext({
@@ -87,12 +99,9 @@ export class ScraperService {
         (await page
           .$$eval(
             [
-              // Typical “Summary” blocks
               'section:has(h2:has-text("Summary")) p',
               'section:has(h3:has-text("Summary")) p',
-              // Sometimes text is in generic divs
               'section:has(h2:has-text("Summary")) div',
-              // Other common PDP containers
               '#description p, #description div',
               '.ProductDescription p, .product-description p',
               '[data-testid="product-description"] p, [data-testid="product-description"] div',
@@ -198,7 +207,6 @@ export class ScraperService {
           const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
           const candidates = imgs
             .map((img) => {
-              // pick the largest src in srcset if present
               const srcset = img.getAttribute('srcset');
               const srcFromSet =
                 srcset
@@ -216,13 +224,9 @@ export class ScraperService {
               return { src, alt, area, ratio, w: r.width, h: r.height };
             })
             .filter((c) => c.src && !isProbablyLogo(c.src, c.alt))
-            // discard tiny assets
-            .filter((c) => c.w >= 180 && c.h >= 180);
+            .filter((c) => c.w >= 180 && c.h >= 180); // discard tiny assets
 
-          // scoring:
-          // - area (bigger is better)
-          // - portrait-ish preference (book covers)
-          // - alt/title hints
+          // scoring
           const title = (titleForBoost || '').toLowerCase();
           const score = (c: (typeof candidates)[number]) => {
             const portraitBoost = c.ratio >= 1.2 ? 2 : 1; // prefer taller than wide
@@ -320,7 +324,11 @@ export class ScraperService {
       this.log.log(`Saved detail for ${product.id}`);
       return detail;
     } finally {
-      await browser.close();
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
