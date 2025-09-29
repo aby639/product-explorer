@@ -1,27 +1,20 @@
-import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { isUUID } from 'class-validator';
-import { Category } from '../entities/category.entity';
-import { Navigation } from '../entities/navigation.entity';
+import { Controller, Get, Param, Post } from '@nestjs/common';
+import { CategoriesService } from './categories.service';
 
 @Controller('categories')
 export class CategoriesController {
-  constructor(
-    @InjectRepository(Category) private readonly categories: Repository<Category>,
-    @InjectRepository(Navigation) private readonly navs: Repository<Navigation>,
-  ) {}
+  constructor(private readonly cats: CategoriesService) {}
 
-  // Accept either a navigation UUID id or a slug like "books"
+  // Accepts nav UUID or slug, e.g. /categories/books
   @Get(':navKey')
-  async list(@Param('navKey') navKey: string) {
-    const navWhere = isUUID(navKey) ? { id: navKey } : { slug: navKey };
-    const nav = await this.navs.findOne({ where: navWhere });
-    if (!nav) throw new NotFoundException('Navigation not found');
+  list(@Param('navKey') navKey: string) {
+    return this.cats.listByNavKey(navKey);
+  }
 
-    return this.categories.find({
-      where: { navigation: { id: nav.id } },
-      order: { title: 'ASC' },
-    });
+  // Optional: reseed quickly if the table was wiped
+  @Post('refresh')
+  async refresh() {
+    await this.cats.ensureSeed();
+    return this.cats.listByNavKey('books');
   }
 }
