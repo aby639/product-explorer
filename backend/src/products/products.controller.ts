@@ -1,4 +1,12 @@
-import { Controller, Get, Param, Query, NotFoundException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  NotFoundException,
+  Post,
+  BadRequestException,
+} from '@nestjs/common';
 import { ProductsService } from './products.service';
 
 @Controller('products')
@@ -27,5 +35,21 @@ export class ProductsController {
     const product = await this.svc.findOneAndMaybeRefresh(id, doRefresh);
     if (!product) throw new NotFoundException('Product not found');
     return product;
+  }
+
+  // ---------------------------------------------------
+  // TEMPORARY: POST /products/seed  (enable via env var)
+  // ---------------------------------------------------
+  @Post('seed')
+  async seed(@Query('key') key?: string) {
+    // Hard off-switch: only works when SEED_ENABLED === '1'
+    if (process.env.SEED_ENABLED !== '1') {
+      throw new NotFoundException(); // looks like the route doesn’t exist
+    }
+    // optional tiny guard
+    if (process.env.SEED_KEY && key !== process.env.SEED_KEY) {
+      throw new BadRequestException('Bad key');
+    }
+    return this.svc.ensureSeedProducts();
   }
 }
