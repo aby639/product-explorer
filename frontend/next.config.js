@@ -1,13 +1,7 @@
 ﻿/** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Produce a fully static export in /out
-  output: 'export',
-
-  // Let the build succeed even if ESLint finds issues
+  output: 'export',                // write static files to /out
   eslint: { ignoreDuringBuilds: true },
-
-  // Disable Next/Image optimizer so static export works
-  images: { unoptimized: true }
+  images: { unoptimized: true }    // needed for static export
 };
-
 module.exports = nextConfig;
