@@ -1,14 +1,19 @@
-import { Controller, Get } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Navigation } from '../entities/navigation.entity';
+import { Controller, Get, Post } from '@nestjs/common';
+import { NavigationService } from './navigation.service';
 
 @Controller('navigation')
 export class NavigationController {
-  constructor(@InjectRepository(Navigation) private readonly navRepo: Repository<Navigation>) {}
+  constructor(private readonly navService: NavigationService) {}
 
   @Get()
-  async list() {
-    return this.navRepo.find({ order: { title: 'ASC' } });
+  list() {
+    return this.navService.findAll();
+  }
+
+  // optional: call to re-seed if the table gets wiped
+  @Post('refresh')
+  async refresh() {
+    await this.navService.ensureSeed();
+    return this.navService.findAll();
   }
 }
