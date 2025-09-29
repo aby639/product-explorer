@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query } from '@nestjs/common';
+import { Controller, Get, Post } from '@nestjs/common';
 import { NavigationService } from './navigation.service';
 
 @Controller('navigation')
@@ -6,14 +6,11 @@ export class NavigationController {
   constructor(private readonly navService: NavigationService) {}
 
   @Get()
-  async list(@Query('refresh') refresh?: string) {
-    if (refresh === 'true') {
-      await this.navService.ensureSeed();
-    }
+  list() {
     return this.navService.findAll();
   }
 
-  // Still keep a POST if you like a dedicated reseed action
+  // optional: lets you reseed if table gets wiped
   @Post('refresh')
   async refresh() {
     await this.navService.ensureSeed();
