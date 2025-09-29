@@ -7,7 +7,7 @@ import { Navigation } from '../entities/navigation.entity';
 export class NavigationService implements OnModuleInit {
   constructor(@InjectRepository(Navigation) private repo: Repository<Navigation>) {}
 
-  // Seed once when the service boots (production DBs often start empty)
+  // Auto-seed once when the service boots (only if table is empty)
   async onModuleInit() {
     await this.ensureSeed();
   }
@@ -16,10 +16,10 @@ export class NavigationService implements OnModuleInit {
     const count = await this.repo.count();
     if (count > 0) return;
 
-    // Adjust field names to match your entity (key/navKey, title, href, etc.)
+    // 👇 use the actual column names from your entity
     const rows: Partial<Navigation>[] = [
-      { key: 'books', title: 'Books' },
-      // add more if you have them (e.g. { key: 'games', title: 'Games' })
+      { navKey: 'books', title: 'Books' },
+      // add more if you want: { navKey: 'games', title: 'Games' },
     ];
 
     await this.repo.save(rows as Navigation[]);
@@ -29,4 +29,3 @@ export class NavigationService implements OnModuleInit {
     return this.repo.find({ order: { title: 'ASC' } });
   }
 }
-
