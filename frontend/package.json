@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && next export -o out",
-    "start": "next start",
+    "build": "next build",
+    "start": "next start -p $PORT",
     "lint": "eslint"
   },
   "dependencies": {
@@ -30,5 +30,8 @@
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.13",
     "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
