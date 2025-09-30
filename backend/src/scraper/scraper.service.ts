@@ -35,7 +35,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-// tiny HTML entity decoder (enough for our text snippets)
+// tiny HTML entity decoder (enough for our snippets)
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -134,8 +134,8 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
-            const json = JSON.parse(s.textContent || '{}');
-            const list = Array.isArray(json) ? json : [json];
+            const data = JSON.parse(s.textContent || '{}');
+            const list = Array.isArray(data) ? data : [data];
             for (const item of list) {
               const t = item?.['@type'];
               const types = Array.isArray(t) ? t : t ? [t] : [];
@@ -179,6 +179,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
  *  - JSON-LD `offers` (lowest price) if present.
  *  - Else scan condition price controls & buttons and pick **lowest**.
  *  - Detect “Currently Unavailable”.
+ *  - If no price found → return null (so we don’t keep stale values).
  */
 async function extractPriceAndCurrency(
   page: PWPage,
@@ -192,7 +193,7 @@ async function extractPriceAndCurrency(
     })
     .catch(() => false);
 
-  // 1) JSON-LD
+  // 1) JSON-LD (min)
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -203,21 +204,23 @@ async function extractPriceAndCurrency(
 
         const touchOffer = (o: any) => {
           const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
-          const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
+          const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
           const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
           if (p != null && p > 0 && p < 1000 && (best == null || p < best)) { best = p; cur = (c || cur); }
         };
 
         for (const s of scripts) {
-          const data = JSON.parse(s.textContent || 'null');
-          const list = Array.isArray(data) ? data : [data];
-          for (const item of list) {
-            const t = item?.['@type'];
-            const types = Array.isArray(t) ? t : t ? [t] : [];
-            if (!types.some((x: string) => /product|book/i.test(x))) continue;
-            const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
-            for (const o of offers) touchOffer(o);
-          }
+          try {
+            const data = JSON.parse(s.textContent || 'null');
+            const list = Array.isArray(data) ? data : [data];
+            for (const item of list) {
+              const t = item?.['@type'];
+              const types = Array.isArray(t) ? t : t ? [t] : [];
+              if (!types.some((x: string) => /product|book/i.test(x))) continue;
+              const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
+              for (const o of offers) touchOffer(o);
+            }
+          } catch {}
         }
         out.price = best;
         out.currency = cur;
@@ -230,69 +233,50 @@ async function extractPriceAndCurrency(
     return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable };
   }
 
-  // 2) Visible condition prices → pick MIN
-  const fromDom = await page
-    .evaluate(() => {
-      const scope = document.querySelector('main') || document.body;
-      const pullText = (el: Element | null | undefined) =>
-        (el?.textContent || '').replace(/\s+/g, ' ').trim();
-
-      const buckets: string[] = [];
-
-      // likely condition/option elements
-      scope
-        .querySelectorAll('[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"]')
-        .forEach(el => {
-          const t = pullText(el);
-          if (t) buckets.push(t);
-        });
-
-      // area near “Select Condition”
-      const label = Array.from(scope.querySelectorAll('*')).find(n =>
-        /select\s*condition/i.test(n.textContent || ''),
-      );
-      if (label) {
-        const near = pullText(label.closest('section') || label.parentElement || undefined);
-        if (near) buckets.push(near);
+  // helper to pull currency amounts from a DOM subtree & return MIN
+  const scanNode = async (sel: string) => {
+    const texts = (await page.locator(sel).allInnerTexts().catch(() => [])) as string[];
+    const joined = texts.join(' | ');
+    const hits: Array<{ v: number; code: 'GBP' | 'EUR' | 'USD' }> = [];
+    const rules: Array<{ rx: RegExp; code: 'GBP'|'EUR'|'USD' }> = [
+      { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
+      { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
+      { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
+      { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
+      { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
+      { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
+    ];
+    for (const { rx, code } of rules) {
+      rx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = rx.exec(joined))) {
+        const v = Number(m[1]);
+        if (isFinite(v) && v > 0 && v < 1000) hits.push({ v, code });
       }
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => a.v - b.v);
+    return hits[0];
+  };
 
-      // basket area
-      const basket = Array.from(scope.querySelectorAll('button, a')).find(n =>
-        /add\s*to\s*basket/i.test(n.textContent || ''),
-      );
-      if (basket) {
-        const near = pullText(basket.closest('section') || basket.parentElement || undefined);
-        if (near) buckets.push(near);
-      }
+  // 2) Target the “Select Condition” cluster (most reliable on WOB)
+  const condFirst =
+    (await scanNode('section:has-text("Select Condition")')) ||
+    (await scanNode('[data-testid*="condition"], [class*="condition"]')) || null;
 
-      const CUR = [
-        { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-        { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-        { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-        { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-        { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-        { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-      ];
+  if (condFirst) return { price: condFirst.v, currency: condFirst.code, unavailable };
 
-      const found: Array<{ v: number; c: string }> = [];
-      for (const s of buckets) {
-        for (const { rx, code } of CUR) {
-          rx.lastIndex = 0;
-          let m: RegExpExecArray | null;
-          while ((m = rx.exec(s))) {
-            const n = Number(m[1]);
-            if (isFinite(n) && n > 0 && n < 1000) found.push({ v: n, c: code });
-          }
-        }
-      }
+  // 3) Basket/primary price area in the main panel
+  const mainMin =
+    (await scanNode('main [data-testid*="price"], main [class*="price"]')) ||
+    (await scanNode('main button, main a')) ||  // catches “Add to Basket £x.xx”
+    (await scanNode('main')) ||
+    null;
 
-      if (!found.length) return { price: null, currency: null as string | null };
-      found.sort((a, b) => a.v - b.v);
-      return { price: found[0].v, currency: found[0].c as string | null };
-    })
-    .catch(() => ({ price: null, currency: null }));
+  if (mainMin) return { price: mainMin.v, currency: mainMin.code, unavailable };
 
-  return { price: fromDom.price, currency: fromDom.currency, unavailable };
+  // nothing trusted found
+  return { price: null, currency: null, unavailable };
 }
 
 /* --------------------------------- service -------------------------------- */
@@ -407,22 +391,24 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    // If page is unavailable, DON'T overwrite a previous valid price.
-    if (!unavailable) {
-      if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
-        if (product.price !== priceNum) {
-          product.price = priceNum!;
-          changedProduct = true;
-        }
+    // Price rules:
+    // - If unavailable OR no price was found -> clear stored price (avoid stale mismatches)
+    // - Else set the fresh price & currency
+    if (unavailable || priceNum == null) {
+      if (product.price != null || product.currency != null) {
+        product.price = null;
+        product.currency = null;
+        changedProduct = true;
       }
-    } else if (product.price == null) {
-      // keep null (so UI can show "Unavailable")
-      product.price = null;
-    }
-
-    if (currencyDetected && product.currency !== currencyDetected) {
-      product.currency = currencyDetected;
-      changedProduct = true;
+    } else {
+      if (product.price !== priceNum) {
+        product.price = priceNum;
+        changedProduct = true;
+      }
+      if (currencyDetected && product.currency !== currencyDetected) {
+        product.currency = currencyDetected;
+        changedProduct = true;
+      }
     }
 
     if (changedProduct) await this.products.save(product);
