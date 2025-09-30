@@ -46,14 +46,17 @@ export class ProductsService {
     });
     if (!product) return null;
 
-    // cooldown to avoid hammering the scraper during dev reloads
+    // cooldown to avoid hammering the scraper during dev/SSR double fetches
     const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
     const COOLDOWN_MS = 30_000;
 
     const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
     const allowNow = Date.now() - last > COOLDOWN_MS;
 
-    if ((refresh || stale) && (allowNow || refresh)) {
+    // IMPORTANT: even if refresh=true, respect a short cooldown (unless no detail exists)
+    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
+
+    if ((stale && allowNow) || forceAllowed) {
       await this.scraper.refreshProduct(id).catch(() => undefined);
       product = await this.repo.findOne({
         where: { id },
@@ -63,9 +66,7 @@ export class ProductsService {
     return product;
   }
 
-  // -------------------------
-  // TEMPORARY: seeding helper
-  // -------------------------
+  // -------------------------  TEMPORARY: seeding helper  -------------------------
   async ensureSeedProducts() {
     // if products already exist, do nothing
     const existing = await this.repo.count();
