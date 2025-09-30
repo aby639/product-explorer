@@ -9,7 +9,12 @@ import { ProductDetail } from '../entities/product-detail.entity';
 
 type PWPage = import('playwright').Page;
 
-/* ----------------------------- small helpers ----------------------------- */
+/* --------------------------------- helpers -------------------------------- */
+
+function absolutize(base: string, u?: string | null) {
+  if (!u) return null;
+  try { return new URL(u, base).toString(); } catch { return null; }
+}
 
 async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0;
@@ -30,32 +35,50 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-function absolutize(base: string, u?: string | null) {
-  if (!u) return null;
-  try { return new URL(u, base).toString(); } catch { return null; }
+// tiny HTML entity decoder (enough for our text snippets)
+function decodeEntities(s: string): string {
+  if (!s) return s;
+  const named = s
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+  return named.replace(/&#(\d+);/g, (_, n) => {
+    const code = Number(n);
+    return Number.isFinite(code) ? String.fromCharCode(code) : _;
+  }).replace(/&#x([0-9a-fA-F]+);/g, (_, hx) => {
+    const code = parseInt(hx, 16);
+    return Number.isFinite(code) ? String.fromCharCode(code) : _;
+  });
 }
 
 /* ------------------------ DOM extraction (Playwright) ------------------------ */
 
 async function extractDescription(page: PWPage): Promise<string | null> {
-  const desc =
+  const raw =
     (await page
       .$$eval(
         [
+          // common “Summary” sections
           'section:has(h2:has-text("Summary")) p',
           'section:has(h3:has-text("Summary")) p',
           'section:has(h2:has-text("Summary")) div',
+          // generic description areas
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
         ].join(','),
-        nodes =>
-          nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
       .catch(() => '')) ||
     (await page
       .evaluate(() => {
         const root = (document.querySelector('main') || document.body)!;
+
+        // heuristic: find heading mentioning “summary/description”
         const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find(h =>
           /summary|description/i.test(h.textContent || ''),
         );
@@ -70,6 +93,8 @@ async function extractDescription(page: PWPage): Promise<string | null> {
             if (text.length >= 40) return text.slice(0, 1500);
           }
         }
+
+        // fallback: meta description/og:description
         const meta =
           document.querySelector<HTMLMetaElement>('meta[name="description"]') ||
           document.querySelector<HTMLMetaElement>('meta[property="og:description"]');
@@ -77,9 +102,10 @@ async function extractDescription(page: PWPage): Promise<string | null> {
         return m.length ? m : '';
       })
       .catch(() => '')) ||
-    null;
+    '';
 
-  return desc && desc.length ? desc : null;
+  const cleaned = decodeEntities(raw).replace(/\s+\n/g, '\n').trim();
+  return cleaned.length ? cleaned : null;
 }
 
 async function extractImage(page: PWPage, baseUrl: string): Promise<string | null> {
@@ -95,14 +121,14 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-        // Prefer OG/Twitter
+        // 1) OG/Twitter
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
-        // JSON-LD for Product/Book
+        // 2) JSON-LD Product/Book
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -119,14 +145,13 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           } catch {}
         }
 
-        // Fallback: biggest portrait-ish IMG in main
+        // 3) Biggest portrait-ish IMG within main
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
           .map(img => {
             const srcset = img.getAttribute('srcset');
-            const srcFromSet =
-              srcset?.split(',')?.map(s => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
+            const srcFromSet = srcset?.split(',')?.map(s => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
             const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
             const alt = (img.getAttribute('alt') || '').toLowerCase();
             const r = img.getBoundingClientRect();
@@ -147,69 +172,102 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
   return absolutize(baseUrl, raw);
 }
 
-/** Strict price extractor: scan the main content for visible currency amounts and pick the MIN. */
+/**
+ * Robust price extractor:
+ *  - First tries JSON-LD offers in the live DOM (min price).
+ *  - Then scans visible *condition* prices near “Select Condition”, basket area, buttons, etc.
+ *  - Picks the **lowest available** (what WOB typically surfaces).
+ */
 async function extractPriceAndCurrency(page: PWPage): Promise<{ price: number | null; currency: string | null }> {
-  return await page
-    .evaluate(() => {
-      // scope to main content to avoid header/footer promos
-      const root = (document.querySelector('main') || document.body).cloneNode(true) as HTMLElement;
+  // 1) JSON-LD
+  const fromLd = await page.evaluate(() => {
+    const out = { price: null as number | null, currency: null as string | null };
+    try {
+      const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+      let best: number | null = null;
+      let cur: string | null = null;
 
-      // Hide script/style/noscript
-      root.querySelectorAll('script,style,noscript').forEach(n => n.remove());
-
-      // Only consider visible text nodes
-      const getText = (el: Element) => {
-        const style = (el as HTMLElement).style;
-        if (!el || (style && (style.display === 'none' || style.visibility === 'hidden'))) return '';
-        return (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const touchOffer = (o: any) => {
+        const raw = o?.price ?? o?.priceSpecification?.price;
+        const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
+        const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
+        if (p != null && (best == null || p < best)) { best = p; cur = (c || cur); }
       };
 
-      const texts: string[] = [];
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-      // Collect texts from likely price containers first
-      const likely = Array.from(root.querySelectorAll('[data-testid*="price"], .price, [itemprop="price"], button, label, span, div'));
-      likely.forEach(el => {
-        const t = getText(el);
-        if (t) texts.push(t);
-      });
-      // Fallback: everything
-      if (!texts.length) {
-        const all = Array.from(root.querySelectorAll('*'));
-        all.forEach(el => {
-          const t = getText(el);
-          if (t) texts.push(t);
-        });
-      }
-
-      const CURRENCIES = [
-        { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
-        { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
-        { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
-        { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
-        { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
-        { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
-      ];
-
-      const found: Array<{ value: number; code: string }> = [];
-      for (const s of texts) {
-        for (const { rx, code } of CURRENCIES) {
-          let m: RegExpExecArray | null;
-          rx.lastIndex = 0;
-          while ((m = rx.exec(s))) {
-            const num = Number(m[1]);
-            if (isFinite(num) && num > 0 && num < 1000) found.push({ value: num, code });
-          }
+      for (const s of scripts) {
+        const data = JSON.parse(s.textContent || 'null');
+        const list = Array.isArray(data) ? data : [data];
+        for (const item of list) {
+          const t = item?.['@type'];
+          const types = Array.isArray(t) ? t : t ? [t] : [];
+          if (!types.some((x: string) => /product|book/i.test(x))) continue;
+          const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
+          for (const o of offers) touchOffer(o);
         }
       }
+      out.price = best;
+      out.currency = cur;
+    } catch {}
+    return out;
+  });
 
-      if (!found.length) return { price: null, currency: null };
+  if (fromLd.price != null) {
+    return { price: fromLd.price, currency: fromLd.currency ?? null };
+  }
 
-      // Choose the *lowest* (WOB shows lowest condition price in the main panel)
-      found.sort((a, b) => a.value - b.value);
-      const { value, code } = found[0];
-      return { price: value, currency: code };
-    })
-    .catch(() => ({ price: null, currency: null }));
+  // 2) Visible text in likely regions → pick MIN
+  const fromDom = await page.evaluate(() => {
+    const scope = document.querySelector('main') || document.body;
+    const texts: string[] = [];
+
+    const pullText = (el: Element | null | undefined) => {
+      if (!el) return;
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) texts.push(t);
+    };
+
+    // condition option buttons/labels
+    scope.querySelectorAll('[role="radio"], button, label, [data-testid*="condition"]').forEach(pullText);
+    // area near “Select Condition”
+    const label = Array.from(scope.querySelectorAll('*')).find(n => /select\s*condition/i.test(n.textContent || ''));
+    pullText(label?.closest('section') || label?.parentElement);
+    // basket area often repeats price
+    const basket = Array.from(scope.querySelectorAll('button, a')).find(n => /add\s*to\s*basket/i.test(n.textContent || ''));
+    pullText(basket?.closest('section') || basket?.parentElement);
+
+    // generic likely price nodes
+    scope.querySelectorAll('[data-testid*="price"], .price, [itemprop="price"], [class*="price"]').forEach(pullText);
+
+    // fallback: whole scope text
+    if (!texts.length) pullText(scope);
+
+    const CURRENCIES: Array<{ rx: RegExp; code: 'GBP'|'USD'|'EUR' }> = [
+      { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
+      { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
+      { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
+      { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
+      { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
+      { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
+    ];
+
+    const found: Array<{ value: number; code: string }> = [];
+    for (const s of texts) {
+      for (const { rx, code } of CURRENCIES) {
+        let m: RegExpExecArray | null;
+        rx.lastIndex = 0;
+        while ((m = rx.exec(s))) {
+          const n = Number(m[1]);
+          if (isFinite(n) && n > 0 && n < 1000) found.push({ value: n, code });
+        }
+      }
+    }
+
+    if (!found.length) return { price: null, currency: null };
+    found.sort((a, b) => a.value - b.value);
+    return { price: found[0].value, currency: found[0].code };
+  });
+
+  return fromDom;
 }
 
 /* --------------------------------- service -------------------------------- */
@@ -269,6 +327,7 @@ export class ScraperService {
 
       const page = await context.newPage();
       await page.waitForTimeout(120 + Math.floor(Math.random() * 200));
+
       const resp = await gotoWithRetry(page, product.sourceUrl);
       status = resp?.status?.() ?? null;
 
@@ -289,14 +348,13 @@ export class ScraperService {
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
 
-      // Extract fields
+      // ---- extract fields ----
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
-      // *** Price: strict & scoped ***
-      const priceRes = await extractPriceAndCurrency(page);
-      priceNum = priceRes.price;
-      currencyDetected = priceRes.currency;
+      const { price, currency } = await extractPriceAndCurrency(page);
+      priceNum = price;
+      currencyDetected = currency;
 
       // Rating (best effort)
       const ratingText =
@@ -308,29 +366,32 @@ export class ScraperService {
       await browser.close().catch(() => undefined);
     }
 
-    // Log once
+    // ---- persist & log ----
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
         priceNum ?? 'na'
       } currency=${currencyDetected ?? 'na'} rating=${ratingAverage ?? 'na'}`,
     );
 
-    // Persist changes
     let changedProduct = false;
+
     if (imageAbs && product.image !== imageAbs) {
       product.image = imageAbs;
       changedProduct = true;
     }
+
     if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
       if (product.price !== priceNum) {
         product.price = priceNum!;
         changedProduct = true;
       }
     }
+
     if (currencyDetected && product.currency !== currencyDetected) {
       product.currency = currencyDetected;
       changedProduct = true;
     }
+
     if (changedProduct) await this.products.save(product);
 
     let detail = await this.details.findOne({
