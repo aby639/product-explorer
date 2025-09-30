@@ -19,10 +19,8 @@ const ds = new DataSource({
 async function run() {
   await ds.initialize();
 
-  // sanity: print what TypeORM actually loaded
   console.log('Loaded entities:', ds.entityMetadatas.map(m => m.name));
-  // quick asserts to catch mismatches early
-  ds.getMetadata(Product); // will throw if not loaded
+  ds.getMetadata(Product); // assert
 
   const navRepo  = ds.getRepository(Navigation);
   const catRepo  = ds.getRepository(Category);
