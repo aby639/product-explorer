@@ -1,3 +1,4 @@
+// backend/src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -12,20 +13,20 @@ async function gotoWithRetry(page: import('playwright').Page, url: string) {
     try {
       const resp = await page.goto(url, {
         waitUntil: 'domcontentloaded',
-        timeout: 60_000,
+        timeout: 90_000,
       });
       if (resp?.status() === 429 && attempt < 2) {
-        await page.waitForTimeout(500 * Math.pow(2, attempt));
+        await page.waitForTimeout(600 * Math.pow(2, attempt));
         attempt++;
         continue;
       }
       return resp;
     } catch {
-      await page.waitForTimeout(500 * Math.pow(2, attempt));
+      await page.waitForTimeout(600 * Math.pow(2, attempt));
       attempt++;
     }
   }
-  return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
+  return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90_000 }).catch(() => null);
 }
 
 @Injectable()
@@ -51,7 +52,7 @@ export class ScraperService {
 
     this.log.log(`Scraping ${product.sourceUrl}`);
 
-    // Container-friendly flags
+    // Required in most PaaS containers
     const launchArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -65,111 +66,89 @@ export class ScraperService {
     try {
       browser = await chromium.launch({ headless: true, args: launchArgs });
 
-      const { userAgent: _ignored, ...desktopChrome } = devices['Desktop Chrome'];
-
+      const { userAgent: _ua, ...desktopChrome } = devices['Desktop Chrome'];
       const context = await browser.newContext({
         ...desktopChrome,
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        locale: 'en-GB',
-        timezoneId: 'Europe/London',
-        colorScheme: 'dark',
       });
-
-      // Some sites dislike a storm of requests; keep analytics/light assets but block heavy fonts/video
-      await context.route('**/*', (route) => {
-        const url = route.request().url();
-        if (/\.(mp4|webm|avi|mov|mkv|woff2?|ttf|otf)$/i.test(url)) return route.abort();
-        return route.continue();
-      });
-
       const page = await context.newPage();
 
-      // Be polite / staggered
+      // polite jitter
       await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
 
       const resp = await gotoWithRetry(page, product.sourceUrl);
-      const status = resp?.status?.() ?? 0;
-      this.log.log(`HTTP status ${status} for ${product.sourceUrl}`);
-
-      // Try to close cookie / consent banners (common patterns)
-      try {
-        const selectors = [
-          '[id^="onetrust-accept"]',
-          'button#onetrust-accept-btn-handler',
-          'button:has-text("Accept All")',
-          'button:has-text("Accept all")',
-          'button:has-text("Accept")',
-        ];
-        for (const s of selectors) {
-          const b = page.locator(s).first();
-          if (await b.isVisible({ timeout: 1500 }).catch(() => false)) {
-            await b.click({ timeout: 1500 }).catch(() => undefined);
-            break;
-          }
-        }
-      } catch {
-        /* ignore */
+      if (resp && resp.status() >= 400 && resp.status() !== 429) {
+        this.log.warn(`Non-OK response ${resp.status()} for ${product.sourceUrl}`);
       }
 
-      // Let late scripts mutate DOM a bit
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => undefined);
-      await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
-      await page.waitForTimeout(400);
+      // --- Handle cookie banners / overlays (WOB uses OneTrust) ---
+      try {
+        const cookieBtn = page.locator(
+          '#onetrust-accept-btn-handler, button#onetrust-accept-btn-handler, button:has-text("Accept all"), button:has-text("Accept All")',
+        );
+        if (await cookieBtn.first().isVisible({ timeout: 2000 }).catch(() => false)) {
+          await cookieBtn.first().click({ timeout: 2000 }).catch(() => undefined);
+          await page.waitForTimeout(250);
+        }
+      } catch { /* ignore */ }
 
-      // ---------------- DESCRIPTION ----------------
+      // Ensure some content is there
+      await page.waitForSelector('main, body', { timeout: 12_000 }).catch(() => undefined);
+      await page.waitForTimeout(350);
+
+      // ======================
+      // DESCRIPTION (robust)
+      // ======================
       const description =
+        // common WOB containers and generic fallbacks
         (await page
           .$$eval(
             [
+              // Typical “Summary” blocks
               'section:has(h2:has-text("Summary")) p',
               'section:has(h3:has-text("Summary")) p',
-              'section:has(h2:has-text("Summary")) div',
+              // WOB specific blocks
+              '[itemprop="description"] p, [itemprop="description"] div',
               '#description p, #description div',
-              '.ProductDescription p, .product-description p',
+              '.product-description p, .ProductDescription p',
               '[data-testid="product-description"] p, [data-testid="product-description"] div',
+              // Generic paragraphs in main (last resort)
+              'main p',
             ].join(','),
             (nodes) =>
               nodes
-                .map((n) => (n.textContent || '').trim())
+                .map((n) => (n.textContent || '').replace(/\s+/g, ' ').trim())
                 .filter(Boolean)
                 .join('\n')
-                .trim(),
+                .trim()
+                .slice(0, 1500),
           )
           .catch(() => '')) ||
         (await page
           .evaluate(() => {
-            const root = (document.querySelector('main') || document.body)!;
-            const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find((h) =>
-              /summary|description/i.test(h.textContent || ''),
-            );
-            if (heading) {
-              const section = heading.closest('section') || heading.parentElement;
-              if (section) {
-                const paras = Array.from(section.querySelectorAll('p,div'));
-                const text = paras
-                  .map((p) => (p.textContent || '').trim())
-                  .filter(Boolean)
-                  .join('\n')
-                  .trim();
-                if (text.length >= 40) return text.slice(0, 1500);
-              }
-            }
-            const meta = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+            // meta description as the final fallback
+            const meta =
+              document.querySelector<HTMLMetaElement>('meta[name="description"]') ||
+              document.querySelector<HTMLMetaElement>('meta[property="og:description"]');
             const m = (meta?.content || '').trim();
-            return m.length ? m : '';
+            return m.length ? m.slice(0, 1500) : '';
           })
           .catch(() => '')) ||
         '';
 
-      // ---------------- RATING ----------------
+      // ======================
+      // RATING (best-effort)
+      // ======================
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       const ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
 
-      // ---------------- IMAGE ----------------
+      // ======================
+      // IMAGE (stubborn)
+      // ======================
       const rawImg = await page
         .evaluate((titleForBoost) => {
           const absolutize = (u: string) => {
@@ -186,7 +165,17 @@ export class ScraperService {
             /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
             /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-          // 1) OpenGraph/Twitter
+          // 0) Secure OG first (many sites use this)
+          const ogSecure =
+            document
+              .querySelector<HTMLMetaElement>('meta[property="og:image:secure_url"]')
+              ?.content?.trim() || null;
+          if (ogSecure && !isProbablyLogo(ogSecure)) {
+            const abs = absolutize(ogSecure);
+            if (abs && !isProbablyLogo(abs)) return abs;
+          }
+
+          // 1) OG/Twitter
           const og =
             document
               .querySelector<HTMLMetaElement>(
@@ -198,30 +187,31 @@ export class ScraperService {
             if (abs && !isProbablyLogo(abs)) return abs;
           }
 
-          // 2) JSON-LD
+          // 2) JSON-LD Product/Book
           const ldList = Array.from(
             document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
           );
           for (const s of ldList) {
             try {
-              const json = JSON.parse(s.textContent || '{}');
-              const types = Array.isArray(json['@type']) ? json['@type'] : [json['@type']];
-              if (types?.some((t) => /product|book/i.test(t))) {
-                const cand =
-                  (Array.isArray(json.image) ? json.image[0] : json.image) ||
-                  json?.offers?.image ||
-                  null;
-                if (cand && !isProbablyLogo(cand)) {
-                  const abs = absolutize(cand);
-                  if (abs && !isProbablyLogo(abs)) return abs;
+              const blob = s.textContent || '{}';
+              const json = JSON.parse(blob);
+              const entries = Array.isArray(json) ? json : [json];
+              for (const j of entries) {
+                const types = Array.isArray(j['@type']) ? j['@type'] : [j['@type']];
+                if (types?.some((t: string) => /product|book/i.test(t))) {
+                  const cand = (Array.isArray(j.image) ? j.image[0] : j.image) || j?.offers?.image || null;
+                  if (cand && !isProbablyLogo(cand)) {
+                    const abs = absolutize(cand);
+                    if (abs && !isProbablyLogo(abs)) return abs;
+                  }
                 }
               }
             } catch {
-              /* ignore */
+              /* ignore bad JSON-LD */
             }
           }
 
-          // 3) Best DOM candidate
+          // 3) DOM candidates in <main>
           const root = document.querySelector('main') || document.body;
           const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
           const candidates = imgs
@@ -242,11 +232,11 @@ export class ScraperService {
               return { src, alt, area, ratio, w: r.width, h: r.height };
             })
             .filter((c) => c.src && !isProbablyLogo(c.src, c.alt))
-            .filter((c) => c.w >= 160 && c.h >= 160);
+            .filter((c) => c.w >= 160 && c.h >= 160); // discard tiny assets
 
           const title = (titleForBoost || '').toLowerCase();
           const score = (c: (typeof candidates)[number]) => {
-            const portraitBoost = c.ratio >= 1.2 ? 2 : 1;
+            const portraitBoost = c.ratio >= 1.15 ? 2 : 1; // book-cover shape
             const titleBoost = title && (c.alt.includes('cover') || c.alt.includes(title)) ? 1.5 : 1;
             return c.area * portraitBoost * titleBoost;
           };
@@ -259,7 +249,9 @@ export class ScraperService {
 
       const imageAbs = rawImg && product.sourceUrl ? new URL(rawImg, product.sourceUrl).toString() : null;
 
-      // ---------------- PRICE (best-effort live) ----------------
+      // ======================
+      // PRICE (fresh if present)
+      // ======================
       const priceText =
         (await page
           .locator(['[data-testid="price"]', '.price', '.ProductPrice', '[itemprop="price"]'].join(','))
@@ -277,38 +269,9 @@ export class ScraperService {
           ? 'USD'
           : product.currency ?? null;
 
-      // --------- LOG what we found (helps in Render logs) ----------
-      this.log.log(
-        `Parsed: descLen=${description?.length ?? 0} image=${imageAbs ? 'yes' : 'no'} price=${
-          priceNum ?? 'n/a'
-        } currency=${currencyDetected ?? 'n/a'}`,
-      );
-
-      // ---------------- RECOMMENDATIONS ----------------
-      const recs = await page
-        .locator(
-          [
-            'section:has(h2:has-text("You may also like")) a[href*="/en-gb/products/"]',
-            'section:has(h2:has-text("Related")) a[href*="/en-gb/products/"]',
-            '.recommended a[href*="/en-gb/products/"]',
-            '.related a[href*="/en-gb/products/"]',
-          ].join(', '),
-        )
-        .all()
-        .then(async (els) => {
-          const out: any[] = [];
-          for (const el of els.slice(0, 12)) {
-            const href = await el.getAttribute('href');
-            const title = (await el.textContent())?.trim() || null;
-            if (!href) continue;
-            const abs = new URL(href, 'https://www.worldofbooks.com').toString();
-            out.push({ href: abs, title });
-          }
-          return out;
-        })
-        .catch(() => []);
-
-      // ---------------- Persist ----------------
+      // ======================
+      // Persist
+      // ======================
       let changedProduct = false;
       if (imageAbs && product.image !== imageAbs) {
         product.image = imageAbs;
@@ -322,7 +285,10 @@ export class ScraperService {
         product.currency = currencyDetected;
         changedProduct = true;
       }
-      if (changedProduct) await this.products.save(product);
+      if (changedProduct) {
+        await this.products.save(product);
+        this.log.log(`Updated product basics (image/price/currency) for ${product.id}`);
+      }
 
       let detail = await this.details.findOne({
         where: { product: { id: product.id } },
@@ -332,7 +298,7 @@ export class ScraperService {
 
       detail.description = description || null;
       detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-      detail.specs = { ...(detail.specs || {}), recommendations: recs };
+      detail.specs = { ...(detail.specs || {}), source: 'wob', updatedAt: new Date().toISOString() };
       detail.lastScrapedAt = new Date();
 
       await this.details.save(detail);
@@ -341,9 +307,7 @@ export class ScraperService {
     } finally {
       try {
         await browser?.close();
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     }
   }
 }
