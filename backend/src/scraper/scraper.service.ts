@@ -1,19 +1,21 @@
-// backend/src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { chromium, devices, Browser, Page } from 'playwright';
+import { chromium, devices } from 'playwright';
 
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 
-async function gotoWithRetry(page: Page, url: string) {
+async function gotoWithRetry(page: import('playwright').Page, url: string) {
   let attempt = 0;
   while (attempt < 3) {
     try {
-      const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      if (resp && [429, 403, 503].includes(resp.status()) && attempt < 2) {
-        await page.waitForTimeout(700 * Math.pow(2, attempt));
+      const resp = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
+      });
+      if (resp?.status() === 429 && attempt < 2) {
+        await page.waitForTimeout(500 * Math.pow(2, attempt));
         attempt++;
         continue;
       }
@@ -49,63 +51,97 @@ export class ScraperService {
 
     this.log.log(`Scraping ${product.sourceUrl}`);
 
-    const browserArgs = [
+    // Container-friendly flags
+    const launchArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--single-process',
-      '--no-zygote'
+      '--no-zygote',
     ];
 
-    let browser: Browser | null = null;
-    try {
-      browser = await chromium.launch({ headless: true, args: browserArgs });
+    let browser: import('playwright').Browser | null = null;
 
-      // Realistic UK desktop profile
+    try {
+      browser = await chromium.launch({ headless: true, args: launchArgs });
+
       const { userAgent: _ignored, ...desktopChrome } = devices['Desktop Chrome'];
+
       const context = await browser.newContext({
         ...desktopChrome,
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         locale: 'en-GB',
         timezoneId: 'Europe/London',
-        extraHTTPHeaders: {
-          'Accept-Language': 'en-GB,en;q=0.9',
-          'Sec-CH-UA-Platform': '"Windows"',
-        },
+        colorScheme: 'dark',
+      });
+
+      // Some sites dislike a storm of requests; keep analytics/light assets but block heavy fonts/video
+      await context.route('**/*', (route) => {
+        const url = route.request().url();
+        if (/\.(mp4|webm|avi|mov|mkv|woff2?|ttf|otf)$/i.test(url)) return route.abort();
+        return route.continue();
       });
 
       const page = await context.newPage();
+
+      // Be polite / staggered
       await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
 
       const resp = await gotoWithRetry(page, product.sourceUrl);
-      if (resp && resp.status() >= 400 && ![429].includes(resp.status())) {
-        this.log.warn(`Non-OK response ${resp.status()} for ${product.sourceUrl}`);
+      const status = resp?.status?.() ?? 0;
+      this.log.log(`HTTP status ${status} for ${product.sourceUrl}`);
+
+      // Try to close cookie / consent banners (common patterns)
+      try {
+        const selectors = [
+          '[id^="onetrust-accept"]',
+          'button#onetrust-accept-btn-handler',
+          'button:has-text("Accept All")',
+          'button:has-text("Accept all")',
+          'button:has-text("Accept")',
+        ];
+        for (const s of selectors) {
+          const b = page.locator(s).first();
+          if (await b.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await b.click({ timeout: 1500 }).catch(() => undefined);
+            break;
+          }
+        }
+      } catch {
+        /* ignore */
       }
 
-      await page.waitForSelector('main, body', { timeout: 12_000 }).catch(() => undefined);
-      await page.waitForTimeout(500);
+      // Let late scripts mutate DOM a bit
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => undefined);
+      await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
+      await page.waitForTimeout(400);
 
-      // ===== DESCRIPTION =====
+      // ---------------- DESCRIPTION ----------------
       const description =
         (await page
-          .locator(
+          .$$eval(
             [
               'section:has(h2:has-text("Summary")) p',
               'section:has(h3:has-text("Summary")) p',
+              'section:has(h2:has-text("Summary")) div',
               '#description p, #description div',
               '.ProductDescription p, .product-description p',
-              '[data-testid="product-description"] p, [data-testid="product-description"] div'
+              '[data-testid="product-description"] p, [data-testid="product-description"] div',
             ].join(','),
+            (nodes) =>
+              nodes
+                .map((n) => (n.textContent || '').trim())
+                .filter(Boolean)
+                .join('\n')
+                .trim(),
           )
-          .allTextContents()
-          .then((arr) => arr.map((s) => s.trim()).filter(Boolean).join('\n').trim())
           .catch(() => '')) ||
         (await page
           .evaluate(() => {
             const root = (document.querySelector('main') || document.body)!;
             const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find((h) =>
-              /summary/i.test(h.textContent || ''),
+              /summary|description/i.test(h.textContent || ''),
             );
             if (heading) {
               const section = heading.closest('section') || heading.parentElement;
@@ -126,33 +162,31 @@ export class ScraperService {
           .catch(() => '')) ||
         '';
 
-      // ===== RATING =====
+      // ---------------- RATING ----------------
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       const ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
 
-      // ===== IMAGE =====
+      // ---------------- IMAGE ----------------
       const rawImg = await page
         .evaluate((titleForBoost) => {
           const absolutize = (u: string) => {
-            try { return new URL(u, location.href).toString(); } catch { return null; }
+            try {
+              return new URL(u, location.href).toString();
+            } catch {
+              return null;
+            }
           };
+
           const isProbablyLogo = (u: string, alt = '') =>
             !u ||
             /\.svg(\?|$)/i.test(u) ||
             /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
             /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-          // preload hero
-          const preload = document.querySelector<HTMLLinkElement>('link[rel="preload"][as="image"]')?.href;
-          if (preload && !isProbablyLogo(preload)) {
-            const abs = absolutize(preload);
-            if (abs && !isProbablyLogo(abs)) return abs;
-          }
-
-          // OG/Twitter
+          // 1) OpenGraph/Twitter
           const og =
             document
               .querySelector<HTMLMetaElement>(
@@ -164,7 +198,7 @@ export class ScraperService {
             if (abs && !isProbablyLogo(abs)) return abs;
           }
 
-          // JSON-LD
+          // 2) JSON-LD
           const ldList = Array.from(
             document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
           );
@@ -173,23 +207,33 @@ export class ScraperService {
               const json = JSON.parse(s.textContent || '{}');
               const types = Array.isArray(json['@type']) ? json['@type'] : [json['@type']];
               if (types?.some((t) => /product|book/i.test(t))) {
-                const cand = (Array.isArray(json.image) ? json.image[0] : json.image) || json?.offers?.image || null;
+                const cand =
+                  (Array.isArray(json.image) ? json.image[0] : json.image) ||
+                  json?.offers?.image ||
+                  null;
                 if (cand && !isProbablyLogo(cand)) {
                   const abs = absolutize(cand);
                   if (abs && !isProbablyLogo(abs)) return abs;
                 }
               }
-            } catch {}
+            } catch {
+              /* ignore */
+            }
           }
 
-          // DOM candidates
+          // 3) Best DOM candidate
           const root = document.querySelector('main') || document.body;
           const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
           const candidates = imgs
             .map((img) => {
               const srcset = img.getAttribute('srcset');
               const srcFromSet =
-                srcset?.split(',')?.map((s) => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
+                srcset
+                  ?.split(',')
+                  ?.map((s) => s.trim().split(' ')[0])
+                  ?.filter(Boolean)
+                  ?.pop() || null;
+
               const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
               const alt = (img.getAttribute('alt') || '').toLowerCase();
               const r = img.getBoundingClientRect();
@@ -198,7 +242,7 @@ export class ScraperService {
               return { src, alt, area, ratio, w: r.width, h: r.height };
             })
             .filter((c) => c.src && !isProbablyLogo(c.src, c.alt))
-            .filter((c) => c.w >= 160 && c.h >= 220);
+            .filter((c) => c.w >= 160 && c.h >= 160);
 
           const title = (titleForBoost || '').toLowerCase();
           const score = (c: (typeof candidates)[number]) => {
@@ -215,7 +259,7 @@ export class ScraperService {
 
       const imageAbs = rawImg && product.sourceUrl ? new URL(rawImg, product.sourceUrl).toString() : null;
 
-      // ===== PRICE =====
+      // ---------------- PRICE (best-effort live) ----------------
       const priceText =
         (await page
           .locator(['[data-testid="price"]', '.price', '.ProductPrice', '[itemprop="price"]'].join(','))
@@ -233,7 +277,14 @@ export class ScraperService {
           ? 'USD'
           : product.currency ?? null;
 
-      // ===== RECOMMENDATIONS =====
+      // --------- LOG what we found (helps in Render logs) ----------
+      this.log.log(
+        `Parsed: descLen=${description?.length ?? 0} image=${imageAbs ? 'yes' : 'no'} price=${
+          priceNum ?? 'n/a'
+        } currency=${currencyDetected ?? 'n/a'}`,
+      );
+
+      // ---------------- RECOMMENDATIONS ----------------
       const recs = await page
         .locator(
           [
@@ -257,14 +308,21 @@ export class ScraperService {
         })
         .catch(() => []);
 
-      // ===== Persist =====
-      let changed = false;
-      if (imageAbs && product.image !== imageAbs) { product.image = imageAbs; changed = true; }
-      if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && product.price !== priceNum) {
-        product.price = priceNum!; changed = true;
+      // ---------------- Persist ----------------
+      let changedProduct = false;
+      if (imageAbs && product.image !== imageAbs) {
+        product.image = imageAbs;
+        changedProduct = true;
       }
-      if (currencyDetected && product.currency !== currencyDetected) { product.currency = currencyDetected; changed = true; }
-      if (changed) await this.products.save(product);
+      if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && product.price !== priceNum) {
+        product.price = priceNum!;
+        changedProduct = true;
+      }
+      if (currencyDetected && product.currency !== currencyDetected) {
+        product.currency = currencyDetected;
+        changedProduct = true;
+      }
+      if (changedProduct) await this.products.save(product);
 
       let detail = await this.details.findOne({
         where: { product: { id: product.id } },
@@ -281,7 +339,11 @@ export class ScraperService {
       this.log.log(`Saved detail for ${product.id}`);
       return detail;
     } finally {
-      try { await browser?.close(); } catch {}
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
