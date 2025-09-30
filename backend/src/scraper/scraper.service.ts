@@ -7,26 +7,28 @@ import { chromium, devices } from 'playwright';
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 
-async function gotoWithRetry(page: import('playwright').Page, url: string) {
+type PWPage = import('playwright').Page;
+
+async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0;
   while (attempt < 3) {
     try {
       const resp = await page.goto(url, {
         waitUntil: 'domcontentloaded',
-        timeout: 90_000,
+        timeout: 60_000,
       });
       if (resp?.status() === 429 && attempt < 2) {
-        await page.waitForTimeout(600 * Math.pow(2, attempt));
+        await page.waitForTimeout(500 * Math.pow(2, attempt));
         attempt++;
         continue;
       }
       return resp;
     } catch {
-      await page.waitForTimeout(600 * Math.pow(2, attempt));
+      await page.waitForTimeout(500 * Math.pow(2, attempt));
       attempt++;
     }
   }
-  return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90_000 }).catch(() => null);
+  return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
 @Injectable()
@@ -52,7 +54,6 @@ export class ScraperService {
 
     this.log.log(`Scraping ${product.sourceUrl}`);
 
-    // Required in most PaaS containers
     const launchArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -61,197 +62,199 @@ export class ScraperService {
       '--no-zygote',
     ];
 
-    let browser: import('playwright').Browser | null = null;
-
+    const browser = await chromium.launch({ headless: true, args: launchArgs });
     try {
-      browser = await chromium.launch({ headless: true, args: launchArgs });
-
+      // Use a realistic desktop profile, set our own UA
       const { userAgent: _ua, ...desktopChrome } = devices['Desktop Chrome'];
       const context = await browser.newContext({
         ...desktopChrome,
+        viewport: { width: 1280, height: 900 },
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        extraHTTPHeaders: {
+          'Accept-Language': 'en-GB,en;q=0.9',
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        },
       });
+
       const page = await context.newPage();
 
-      // polite jitter
-      await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
+      // Be polite and jitter
+      await page.waitForTimeout(100 + Math.floor(Math.random() * 200));
 
       const resp = await gotoWithRetry(page, product.sourceUrl);
-      if (resp && resp.status() >= 400 && resp.status() !== 429) {
-        this.log.warn(`Non-OK response ${resp.status()} for ${product.sourceUrl}`);
+      const status = resp?.status?.() ?? null;
+      if (status && status >= 400 && status !== 429) {
+        this.log.warn(`Non-OK response ${status} for ${product.sourceUrl}`);
       }
 
-      // --- Handle cookie banners / overlays (WOB uses OneTrust) ---
-      try {
-        const cookieBtn = page.locator(
-          '#onetrust-accept-btn-handler, button#onetrust-accept-btn-handler, button:has-text("Accept all"), button:has-text("Accept All")',
-        );
-        if (await cookieBtn.first().isVisible({ timeout: 2000 }).catch(() => false)) {
-          await cookieBtn.first().click({ timeout: 2000 }).catch(() => undefined);
-          await page.waitForTimeout(250);
-        }
-      } catch { /* ignore */ }
+      // Try to accept cookies if a banner appears
+      await page
+        .locator(
+          [
+            'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
+            'button:has-text("Accept cookies")',
+            '[aria-label="accept cookies"]',
+          ].join(','),
+        )
+        .first()
+        .click({ timeout: 3_000 })
+        .catch(() => undefined);
 
-      // Ensure some content is there
-      await page.waitForSelector('main, body', { timeout: 12_000 }).catch(() => undefined);
-      await page.waitForTimeout(350);
+      // Let dynamic DOM settle
+      await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
+      await page.waitForTimeout(400);
 
-      // ======================
-      // DESCRIPTION (robust)
-      // ======================
+      // ===== DESCRIPTION =====
       const description =
-        // common WOB containers and generic fallbacks
         (await page
           .$$eval(
             [
-              // Typical “Summary” blocks
               'section:has(h2:has-text("Summary")) p',
               'section:has(h3:has-text("Summary")) p',
-              // WOB specific blocks
-              '[itemprop="description"] p, [itemprop="description"] div',
+              'section:has(h2:has-text("Summary")) div',
               '#description p, #description div',
-              '.product-description p, .ProductDescription p',
+              '.ProductDescription p, .product-description p',
               '[data-testid="product-description"] p, [data-testid="product-description"] div',
-              // Generic paragraphs in main (last resort)
-              'main p',
             ].join(','),
             (nodes) =>
               nodes
-                .map((n) => (n.textContent || '').replace(/\s+/g, ' ').trim())
+                .map((n) => (n.textContent || '').trim())
                 .filter(Boolean)
                 .join('\n')
-                .trim()
-                .slice(0, 1500),
+                .trim(),
           )
           .catch(() => '')) ||
         (await page
           .evaluate(() => {
-            // meta description as the final fallback
+            const root = (document.querySelector('main') || document.body)!;
+            const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find((h) =>
+              /summary|description/i.test(h.textContent || ''),
+            );
+            if (heading) {
+              const section = heading.closest('section') || heading.parentElement;
+              if (section) {
+                const paras = Array.from(section.querySelectorAll('p,div'));
+                const text = paras
+                  .map((p) => (p.textContent || '').trim())
+                  .filter(Boolean)
+                  .join('\n')
+                  .trim();
+                if (text.length >= 40) return text.slice(0, 1500);
+              }
+            }
             const meta =
               document.querySelector<HTMLMetaElement>('meta[name="description"]') ||
               document.querySelector<HTMLMetaElement>('meta[property="og:description"]');
             const m = (meta?.content || '').trim();
-            return m.length ? m.slice(0, 1500) : '';
+            return m.length ? m : '';
           })
           .catch(() => '')) ||
         '';
 
-      // ======================
-      // RATING (best-effort)
-      // ======================
+      // ===== RATING (best effort) =====
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       const ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
 
-      // ======================
-      // IMAGE (stubborn)
-      // ======================
-      const rawImg = await page
-        .evaluate((titleForBoost) => {
-          const absolutize = (u: string) => {
-            try {
-              return new URL(u, location.href).toString();
-            } catch {
-              return null;
+      // ===== IMAGE (robust + OG/JSON-LD fallback) =====
+      const rawImg =
+        (await page
+          .evaluate(() => {
+            const absolutize = (u: string) => {
+              try {
+                return new URL(u, location.href).toString();
+              } catch {
+                return null;
+              }
+            };
+            const isLogo = (u: string, alt = '') =>
+              !u ||
+              /\.svg(\?|$)/i.test(u) ||
+              /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(
+                u,
+              ) ||
+              /(logo|trustpilot|icon|placeholder)/i.test(alt);
+
+            // OG/Twitter
+            const og =
+              document
+                .querySelector<HTMLMetaElement>(
+                  'meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]',
+                )
+                ?.content?.trim() || null;
+            if (og && !isLogo(og)) {
+              const abs = absolutize(og);
+              if (abs && !isLogo(abs)) return abs;
             }
-          };
 
-          const isProbablyLogo = (u: string, alt = '') =>
-            !u ||
-            /\.svg(\?|$)/i.test(u) ||
-            /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
-            /(logo|trustpilot|icon|placeholder)/i.test(alt);
-
-          // 0) Secure OG first (many sites use this)
-          const ogSecure =
-            document
-              .querySelector<HTMLMetaElement>('meta[property="og:image:secure_url"]')
-              ?.content?.trim() || null;
-          if (ogSecure && !isProbablyLogo(ogSecure)) {
-            const abs = absolutize(ogSecure);
-            if (abs && !isProbablyLogo(abs)) return abs;
-          }
-
-          // 1) OG/Twitter
-          const og =
-            document
-              .querySelector<HTMLMetaElement>(
-                'meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]',
-              )
-              ?.content?.trim() || null;
-          if (og && !isProbablyLogo(og)) {
-            const abs = absolutize(og);
-            if (abs && !isProbablyLogo(abs)) return abs;
-          }
-
-          // 2) JSON-LD Product/Book
-          const ldList = Array.from(
-            document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
-          );
-          for (const s of ldList) {
-            try {
-              const blob = s.textContent || '{}';
-              const json = JSON.parse(blob);
-              const entries = Array.isArray(json) ? json : [json];
-              for (const j of entries) {
-                const types = Array.isArray(j['@type']) ? j['@type'] : [j['@type']];
-                if (types?.some((t: string) => /product|book/i.test(t))) {
-                  const cand = (Array.isArray(j.image) ? j.image[0] : j.image) || j?.offers?.image || null;
-                  if (cand && !isProbablyLogo(cand)) {
+            // JSON-LD
+            const ldList = Array.from(
+              document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
+            );
+            for (const s of ldList) {
+              try {
+                const json = JSON.parse(s.textContent || '{}');
+                const types = Array.isArray(json['@type']) ? json['@type'] : [json['@type']];
+                if (types?.some((t) => /product|book/i.test(t))) {
+                  const cand =
+                    (Array.isArray(json.image) ? json.image[0] : json.image) ||
+                    json?.offers?.image ||
+                    null;
+                  if (cand && !isLogo(cand)) {
                     const abs = absolutize(cand);
-                    if (abs && !isProbablyLogo(abs)) return abs;
+                    if (abs && !isLogo(abs)) return abs;
                   }
                 }
+              } catch {
+                /* ignore */
               }
-            } catch {
-              /* ignore bad JSON-LD */
             }
-          }
 
-          // 3) DOM candidates in <main>
-          const root = document.querySelector('main') || document.body;
-          const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
-          const candidates = imgs
-            .map((img) => {
-              const srcset = img.getAttribute('srcset');
-              const srcFromSet =
-                srcset
-                  ?.split(',')
-                  ?.map((s) => s.trim().split(' ')[0])
-                  ?.filter(Boolean)
-                  ?.pop() || null;
+            // DOM within <main>
+            const root = document.querySelector('main') || document.body;
+            const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
+            const candidates = imgs
+              .map((img) => {
+                const srcset = img.getAttribute('srcset');
+                const srcFromSet =
+                  srcset
+                    ?.split(',')
+                    ?.map((s) => s.trim().split(' ')[0])
+                    ?.filter(Boolean)
+                    ?.pop() || null;
+                const src =
+                  img.getAttribute('src') ||
+                  img.getAttribute('data-src') ||
+                  srcFromSet ||
+                  img.currentSrc ||
+                  '';
+                const alt = (img.getAttribute('alt') || '').toLowerCase();
+                const r = img.getBoundingClientRect();
+                const area = r.width * r.height;
+                const ratio = r.height / Math.max(1, r.width);
+                return { src, alt, area, ratio, w: r.width, h: r.height };
+              })
+              .filter((c) => c.src && !isLogo(c.src, c.alt))
+              .filter((c) => c.w >= 180 && c.h >= 180);
 
-              const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
-              const alt = (img.getAttribute('alt') || '').toLowerCase();
-              const r = img.getBoundingClientRect();
-              const area = r.width * r.height;
-              const ratio = r.height / Math.max(1, r.width);
-              return { src, alt, area, ratio, w: r.width, h: r.height };
-            })
-            .filter((c) => c.src && !isProbablyLogo(c.src, c.alt))
-            .filter((c) => c.w >= 160 && c.h >= 160); // discard tiny assets
-
-          const title = (titleForBoost || '').toLowerCase();
-          const score = (c: (typeof candidates)[number]) => {
-            const portraitBoost = c.ratio >= 1.15 ? 2 : 1; // book-cover shape
-            const titleBoost = title && (c.alt.includes('cover') || c.alt.includes(title)) ? 1.5 : 1;
-            return c.area * portraitBoost * titleBoost;
-          };
-
-          candidates.sort((a, b) => score(b) - score(a));
-          const best = candidates[0]?.src || null;
-          return best ? absolutize(best) : null;
-        }, product.title)
-        .catch(() => null);
+            candidates.sort((a, b) => {
+              // prefer large, portrait-ish
+              const score = (c: any) => c.area * (c.ratio >= 1.2 ? 2 : 1);
+              return score(b) - score(a);
+            });
+            const best = candidates[0]?.src || null;
+            return best ? absolutize(best) : null;
+          })
+          .catch(() => null)) || null;
 
       const imageAbs = rawImg && product.sourceUrl ? new URL(rawImg, product.sourceUrl).toString() : null;
 
-      // ======================
-      // PRICE (fresh if present)
-      // ======================
+      // ===== PRICE (optional) =====
       const priceText =
         (await page
           .locator(['[data-testid="price"]', '.price', '.ProductPrice', '[itemprop="price"]'].join(','))
@@ -269,9 +272,14 @@ export class ScraperService {
           ? 'USD'
           : product.currency ?? null;
 
-      // ======================
-      // Persist
-      // ======================
+      // ===== LOG what we found (shows in Render logs) =====
+      this.log.log(
+        `Found: status=${status} img=${imageAbs ? 'yes' : 'no'} descLen=${description.length} price=${
+          priceNum ?? 'na'
+        }`,
+      );
+
+      // ===== Persist =====
       let changedProduct = false;
       if (imageAbs && product.image !== imageAbs) {
         product.image = imageAbs;
@@ -285,10 +293,7 @@ export class ScraperService {
         product.currency = currencyDetected;
         changedProduct = true;
       }
-      if (changedProduct) {
-        await this.products.save(product);
-        this.log.log(`Updated product basics (image/price/currency) for ${product.id}`);
-      }
+      if (changedProduct) await this.products.save(product);
 
       let detail = await this.details.findOne({
         where: { product: { id: product.id } },
@@ -298,16 +303,14 @@ export class ScraperService {
 
       detail.description = description || null;
       detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-      detail.specs = { ...(detail.specs || {}), source: 'wob', updatedAt: new Date().toISOString() };
+      detail.specs = { ...(detail.specs || {}), lastStatus: status };
       detail.lastScrapedAt = new Date();
 
       await this.details.save(detail);
       this.log.log(`Saved detail for ${product.id}`);
       return detail;
     } finally {
-      try {
-        await browser?.close();
-      } catch { /* ignore */ }
+      await browser.close().catch(() => undefined);
     }
   }
 }
