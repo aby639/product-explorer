@@ -13,11 +13,7 @@ type PWPage = import('playwright').Page;
 
 function absolutize(base: string, u?: string | null) {
   if (!u) return null;
-  try {
-    return new URL(u, base).toString();
-  } catch {
-    return null;
-  }
+  try { return new URL(u, base).toString(); } catch { return null; }
 }
 
 async function gotoWithRetry(page: PWPage, url: string) {
@@ -77,35 +73,30 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
         ].join(','),
-        (nodes) => nodes.map((n) => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
       .catch(() => '')) ||
     (await page
       .evaluate(() => {
         const root = (document.querySelector('main') || document.body)!;
-
-        // heuristic: find heading mentioning “summary/description”
-        const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find((h) =>
+        const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find(h =>
           /summary|description/i.test(h.textContent || ''),
         );
         if (heading) {
           const section = heading.closest('section') || heading.parentElement;
           if (section) {
             const text = Array.from(section.querySelectorAll('p,div'))
-              .map((p) => (p.textContent || '').trim())
+              .map(p => (p.textContent || '').trim())
               .filter(Boolean)
               .join('\n')
               .trim();
             if (text.length >= 40) return text.slice(0, 1500);
           }
         }
-
-        // fallback: meta description/og:description
         const meta =
           document.querySelector<HTMLMetaElement>('meta[name="description"]') ||
           document.querySelector<HTMLMetaElement>('meta[property="og:description"]');
-        const m = (meta?.content || '').trim();
-        return m.length ? m : '';
+        return (meta?.content || '').trim();
       })
       .catch(() => '')) ||
     '';
@@ -119,11 +110,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
     (await page
       .evaluate(() => {
         const absolutize = (u: string) => {
-          try {
-            return new URL(u, location.href).toString();
-          } catch {
-            return null;
-          }
+          try { return new URL(u, location.href).toString(); } catch { return null; }
         };
         const isLogo = (u: string, alt = '') =>
           !u ||
@@ -134,13 +121,11 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         // 1) OG/Twitter
         const og =
           document
-            .querySelector<HTMLMetaElement>(
-              'meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]',
-            )
+            .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
-        // 2) JSON-LD Product/Book
+        // 2) JSON-LD (Product/Book)
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -161,10 +146,9 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
-          .map((img) => {
+          .map(img => {
             const srcset = img.getAttribute('srcset');
-            const srcFromSet =
-              srcset?.split(',')?.map((s) => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
+            const srcFromSet = srcset?.split(',')?.map(s => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
             const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
             const alt = (img.getAttribute('alt') || '').toLowerCase();
             const r = img.getBoundingClientRect();
@@ -172,8 +156,8 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
             const ratio = r.height / Math.max(1, r.width);
             return { src, alt, area, ratio, w: r.width, h: r.height };
           })
-          .filter((c) => c.src && !isLogo(c.src, c.alt))
-          .filter((c) => c.w >= 180 && c.h >= 180);
+          .filter(c => c.src && !isLogo(c.src, c.alt))
+          .filter(c => c.w >= 180 && c.h >= 180);
 
         const score = (c: any) => c.area * (c.ratio >= 1.2 ? 2 : 1);
         candidates.sort((a, b) => score(b) - score(a));
@@ -185,16 +169,17 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
   return absolutize(baseUrl, raw);
 }
 
+/* --------------------------- PRICE EXTRACTION --------------------------- */
 /**
- * Robust price extractor:
- *  - JSON-LD `offers` (lowest price) if present.
- *  - Else scan condition price controls & buttons and pick **lowest**.
- *  - Detect “Currently Unavailable”.
+ * Strategy (in order):
+ *  1) Next.js __NEXT_DATA__ (most reliable, has all variants).
+ *  2) JSON-LD offers (lowest price).
+ *  3) Visible DOM scan (as a last resort; pick MIN).
  */
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean }> {
-  // 0) Unavailable flag early
+  // Unavailable flag
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -203,7 +188,46 @@ async function extractPriceAndCurrency(
     })
     .catch(() => false);
 
-  // 1) JSON-LD
+  // 1) Next.js data
+  const fromNext = await page
+    .evaluate(() => {
+      const out = { price: null as number | null, currency: null as string | null };
+      try {
+        const script = document.querySelector<HTMLScriptElement>('#__NEXT_DATA__');
+        if (!script?.textContent) return out;
+        const data = JSON.parse(script.textContent);
+        // WoB keeps data around dataProps/pageProps; try a few common paths
+        const bag: any[] = [];
+        const pushOffers = (node: any) => {
+          if (!node || typeof node !== 'object') return;
+          // product + variants
+          if (node.currentPrice?.price) {
+            bag.push({ p: Number(node.currentPrice.price), c: node.currentPrice.currency || node.currency || null });
+          }
+          if (node.price) {
+            bag.push({ p: Number(node.price), c: node.currency || null });
+          }
+          // recurse
+          for (const v of Object.values(node)) {
+            if (v && typeof v === 'object') pushOffers(v);
+          }
+        };
+        pushOffers(data);
+        const valid = bag.filter(x => Number.isFinite(x.p) && x.p > 0 && x.p < 1000);
+        if (!valid.length) return out;
+        valid.sort((a, b) => a.p - b.p);
+        out.price = valid[0].p;
+        out.currency = valid[0].c ?? null;
+      } catch {}
+      return out;
+    })
+    .catch(() => ({ price: null, currency: null }));
+
+  if (fromNext.price != null) {
+    return { price: fromNext.price, currency: fromNext.currency ?? 'GBP', unavailable };
+  }
+
+  // 2) JSON-LD
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -211,17 +235,12 @@ async function extractPriceAndCurrency(
         const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         let best: number | null = null;
         let cur: string | null = null;
-
         const touchOffer = (o: any) => {
           const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
           const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
-          const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
-          if (p != null && p > 0 && p < 1000 && (best == null || p < best)) {
-            best = p;
-            cur = c || cur;
-          }
+          const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? o?.priceCurrencyCode ?? null;
+          if (p != null && p > 0 && p < 1000 && (best == null || p < best)) { best = p; cur = (c || cur); }
         };
-
         for (const s of scripts) {
           const data = JSON.parse(s.textContent || 'null');
           const list = Array.isArray(data) ? data : [data];
@@ -241,60 +260,41 @@ async function extractPriceAndCurrency(
     .catch(() => ({ price: null, currency: null }));
 
   if (fromLd.price != null) {
-    return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable };
+    return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable };
   }
 
-  // 2) Visible condition prices → pick MIN
+  // 3) Visible DOM (last resort; CSS may hide the currency symbol)
   const fromDom = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
-
       const pullText = (el: Element | null | undefined) =>
         (el?.textContent || '').replace(/\s+/g, ' ').trim();
-
       const buckets: string[] = [];
-
-      // WOB specific: condition buttons with prices
       scope
-        .querySelectorAll(
-          [
-            '[role="radio"]',
-            '[role="option"]',
-            'button',
-            'label',
-            '[data-testid*="condition"]',
-            '[data-testid*="price"]',
-            '.price',
-            '[itemprop="price"]',
-            '[class*="price"]',
-          ].join(','),
-        )
-        .forEach((el) => {
+        .querySelectorAll('[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"], [itemprop="price"]')
+        .forEach(el => {
           const t = pullText(el);
           if (t) buckets.push(t);
+          // Some sites keep raw numbers in data attributes
+          const ds = (el as HTMLElement).dataset || {};
+          for (const v of Object.values(ds)) if (typeof v === 'string' && v) buckets.push(v);
         });
-
-      // area near “Select Condition”
-      const label = Array.from(scope.querySelectorAll('*')).find((n) =>
-        /select\s*condition/i.test(n.textContent || ''),
-      );
+      const label = Array.from(scope.querySelectorAll('*')).find(n => /select\s*condition/i.test(n.textContent || ''));
       if (label) {
         const near = pullText(label.closest('section') || label.parentElement || undefined);
         if (near) buckets.push(near);
       }
-
-      // basket area
-      const basket = Array.from(scope.querySelectorAll('button, a')).find((n) =>
-        /add\s*to\s*basket/i.test(n.textContent || ''),
-      );
+      const basket = Array.from(scope.querySelectorAll('button, a')).find(n => /add\s*to\s*basket/i.test(n.textContent || ''));
       if (basket) {
         const near = pullText(basket.closest('section') || basket.parentElement || undefined);
         if (near) buckets.push(near);
       }
 
+      // currency may be added by CSS; also match bare numbers like 3.50
       const CUR = [
         { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
         { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
+        { rx: /(?:^|\s)(\d+(?:\.\d{1,2})?)(?:\s?(?:GBP))?/g, code: 'GBP' as const }, // bare number fallback
         { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
         { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
         { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
@@ -312,7 +312,6 @@ async function extractPriceAndCurrency(
           }
         }
       }
-
       if (!found.length) return { price: null, currency: null as string | null };
       found.sort((a, b) => a.v - b.v);
       return { price: found[0].v, currency: found[0].c as string | null };
@@ -384,6 +383,10 @@ export class ScraperService {
       const resp = await gotoWithRetry(page, product.sourceUrl);
       status = resp?.status?.() ?? null;
 
+      // Try to let hydration happen
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+
       // Cookie banner (best effort)
       await page
         .locator(
@@ -399,7 +402,8 @@ export class ScraperService {
         .catch(() => undefined);
 
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
-      await page.waitForTimeout(300);
+      // wait a bit more for client rendering of price widgets
+      await page.waitForTimeout(600);
 
       // ---- extract fields ----
       description = await extractDescription(page);
@@ -407,7 +411,7 @@ export class ScraperService {
 
       const { price, currency, unavailable: unavail } = await extractPriceAndCurrency(page);
       priceNum = price;
-      currencyDetected = currency;
+      currencyDetected = currency ?? 'GBP';
       unavailable = unavail;
 
       // Rating (best effort)
@@ -434,25 +438,20 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    // KEY CHANGE:
-    // - If unavailable OR we failed to find a price → clear it to avoid stale seeded values.
-    // - Else set the parsed price.
-    if (unavailable || priceNum == null) {
-      if (product.price !== null) {
-        product.price = null;
-        changedProduct = true;
+    // Only overwrite price when we have a concrete number (or mark null if unavailable and no price yet)
+    if (!unavailable) {
+      if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
+        if (product.price !== priceNum) {
+          product.price = priceNum!;
+          changedProduct = true;
+        }
       }
-    } else if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
-      if (product.price !== priceNum) {
-        product.price = priceNum!;
-        changedProduct = true;
-      }
+    } else if (product.price == null) {
+      product.price = null;
     }
 
-    // currency only when we have a price; otherwise clear it
-    const newCurrency = priceNum != null && !unavailable ? currencyDetected ?? product.currency ?? null : null;
-    if (product.currency !== newCurrency) {
-      product.currency = newCurrency;
+    if (currencyDetected && product.currency !== currencyDetected) {
+      product.currency = currencyDetected;
       changedProduct = true;
     }
 
