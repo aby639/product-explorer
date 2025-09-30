@@ -45,6 +45,50 @@ function firstMeta(html: string, names: string[]): string | null {
   return null;
 }
 
+function extractOffersFromJsonLD(html: string): { price: number | null; currency: string | null } {
+  const scripts = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) || [];
+  const parseNum = (s: any) => {
+    const n = Number(String(s ?? '').replace(/[^\d.]/g, ''));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  let bestPrice: number | null = null;
+  let bestCurrency: string | null = null;
+
+  for (const s of scripts) {
+    const body = s.replace(/^.*?>/s, '').replace(/<\/script>$/i, '');
+    try {
+      const root = JSON.parse(body);
+      const items = Array.isArray(root) ? root : [root];
+
+      for (const item of items) {
+        const t = item?.['@type'];
+        const types = Array.isArray(t) ? t : t ? [t] : [];
+        const isProduct = types.some((x: string) => /product|book/i.test(x));
+        if (!isProduct) continue;
+
+        const offers = item?.offers;
+        const list = Array.isArray(offers) ? offers : offers ? [offers] : [];
+
+        for (const o of list) {
+          const p = parseNum(o?.price);
+          if (!p) continue;
+          const c = String(o?.priceCurrency || '').toUpperCase() || null;
+
+          if (bestPrice == null || p < bestPrice) {
+            bestPrice = p;
+            bestCurrency = c;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { price: bestPrice, currency: bestCurrency };
+}
+
 function firstJsonLdImage(html: string): string | null {
   const scripts = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) || [];
   for (const s of scripts) {
@@ -134,12 +178,18 @@ export class ScraperService {
       const ldImg = firstJsonLdImage(html);
       imageAbs = abs(product.sourceUrl, ogImg || ldImg);
 
-      // quick price & currency
-      const priceMatch = html.match(/(?:£|\bGBP\b|\$|\bUSD\b|€|\bEUR\b)\s?([\d]+(?:\.\d{1,2})?)/i);
-      if (priceMatch) {
-        priceNum = Number(priceMatch[1]);
-        const raw = priceMatch[0];
-        currencyDetected = /£|GBP/i.test(raw) ? 'GBP' : /\$|USD/i.test(raw) ? 'USD' : /€|EUR/i.test(raw) ? 'EUR' : null;
+      // Prefer JSON-LD offers (lowest price)
+      const offer = extractOffersFromJsonLD(html);
+      if (offer.price) {
+        priceNum = offer.price;
+        currencyDetected = offer.currency;
+      }
+
+      // Quick currency hint from HTML if still unknown
+      if (!currencyDetected) {
+        if (/worldofbooks\.com\/en-gb/i.test(product.sourceUrl)) currencyDetected = 'GBP';
+        else if (/€|EUR/i.test(html)) currencyDetected = 'EUR';
+        else if (/\$|USD/i.test(html)) currencyDetected = 'USD';
       }
 
       // rating (best-effort)
@@ -149,8 +199,9 @@ export class ScraperService {
       this.log.warn(`HTTP scrape failed: ${(e as Error).message}`);
     }
 
-    /* ============== 2) Playwright fallback if HTTP was insufficient ============== */
-    if (!imageAbs || !description) {
+    /* ============== 2) Playwright fallback / augmentation ===================== */
+    const needBrowser = !imageAbs || !description || !priceNum;
+    if (needBrowser) {
       const launchArgs = [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -334,38 +385,60 @@ export class ScraperService {
           imageAbs = rawImg ? new URL(rawImg, product.sourceUrl).toString() : null;
         }
 
-        // price via DOM (if still missing)
+        // price via DOM (if still missing) — look at condition buttons and pick the lowest
         if (!priceNum) {
-          const priceText =
+          const { p, c } =
             (await page
-              .locator(['[data-testid="price"]', '.price', '.ProductPrice', '[itemprop="price"]'].join(','))
-              .first()
-              .textContent()
-              .catch(() => null)) || null;
-          if (priceText) {
-            priceNum = Number(String(priceText).replace(/[^\d.]/g, '')) || null;
-            currencyDetected =
-              /£|GBP/i.test(priceText)
-                ? 'GBP'
-                : /€|EUR/i.test(priceText)
-                ? 'EUR'
-                : /\$|USD/i.test(priceText)
-                ? 'USD'
-                : currencyDetected;
-          }
+              .$$eval(
+                [
+                  // WOB condition choices often are buttons with embedded price text
+                  'button:has(.price)',
+                  'button:has-text("Very Good")',
+                  'button:has-text("Well Read")',
+                  // generic fallbacks
+                  '[itemprop="price"]',
+                  '.price',
+                  '.ProductPrice',
+                ].join(','),
+                (els) => {
+                  const vals: { p: number; gbp: boolean; eur: boolean; usd: boolean }[] = [];
+                  for (const el of els) {
+                    const t = (el.textContent || '').trim();
+                    if (!t) continue;
+                    const n = Number(t.replace(/[^\d.]/g, ''));
+                    if (!isFinite(n) || n <= 0) continue;
+                    vals.push({
+                      p: n,
+                      gbp: /£|GBP/i.test(t),
+                      eur: /€|EUR/i.test(t),
+                      usd: /\$|USD/i.test(t),
+                    });
+                  }
+                  vals.sort((a, b) => a.p - b.p);
+                  const best = vals[0];
+                  if (!best) return { p: null as any, c: null as any };
+                  let c: string | null = null;
+                  if (best.gbp) c = 'GBP';
+                  else if (best.eur) c = 'EUR';
+                  else if (best.usd) c = 'USD';
+                  return { p: best.p, c };
+                },
+              )
+              .catch(() => ({ p: null as any, c: null as any }))) || { p: null, c: null };
+
+          if (p) priceNum = p;
+          if (c && !currencyDetected) currencyDetected = c;
         }
+
+        // last currency fallback from URL
+        if (!currencyDetected) {
+          if (/worldofbooks\.com\/en-gb/i.test(product.sourceUrl)) currencyDetected = 'GBP';
+        }
+
+        await context.close().catch(() => undefined);
       } finally {
-        await chromium
-          .connectOverCDP // ensure we really close whatever we launched
-          ?.toString();
-        // normal close:
-        try {
-          await (await (async () => undefined))?.valueOf();
-        } catch {}
-        // best-effort close:
-        await (await (async () => undefined))?.valueOf;
+        await browser.close().catch(() => undefined);
       }
-      // NOTE: we intentionally don't log here; we log below once for both paths
     }
 
     /* ------------------------------- persist/log ------------------------------- */
@@ -381,7 +454,7 @@ export class ScraperService {
       changedProduct = true;
     }
     if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && product.price !== priceNum) {
-      product.price = priceNum!;
+      product.price = Number((priceNum as number).toFixed(2));
       changedProduct = true;
     }
     if (currencyDetected && product.currency !== currencyDetected) {
