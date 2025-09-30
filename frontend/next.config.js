@@ -1,15 +1,20 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // run as a server app (REMOVE static export)
-  // output: 'export',
+  // make sure you are NOT exporting statically
+  // output: 'export', // <-- keep this commented/removed
 
-  // let the build succeed even if ESLint finds issues
   eslint: { ignoreDuringBuilds: true },
 
-  // fine to keep; harmless on server too
-  images: { unoptimized: true },
+  images: {
+    unoptimized: true, // fine on Render
+    remotePatterns: [
+      { protocol: 'https', hostname: 'images.worldofbooks.com' },
+      { protocol: 'https', hostname: 'www.worldofbooks.com' },
+      // if you ever see covers coming from a different WOB CDN, add it here
+      // { protocol: 'https', hostname: 'cdn.worldofbooks.com' },
+    ],
+  },
 
-  // (optional) quiet the “workspace root” warning on Render
   experimental: {
     outputFileTracingRoot: process.cwd(),
   },
