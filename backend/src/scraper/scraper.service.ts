@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { chromium, devices } from 'playwright';
+
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 
@@ -19,19 +20,22 @@ async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0;
   while (attempt < 3) {
     try {
-      const resp = await page.goto(url, { waitUntil: 'load', timeout: 60_000 });
-      // give the client-side app a moment to hydrate & fetch bits (Render is slower)
-      await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+      const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      if (resp?.status() === 429 && attempt < 2) {
+        await page.waitForTimeout(500 * Math.pow(2, attempt));
+        attempt++;
+        continue;
+      }
       return resp;
     } catch {
       await page.waitForTimeout(500 * Math.pow(2, attempt));
       attempt++;
     }
   }
-  return page.goto(url, { waitUntil: 'load', timeout: 60_000 }).catch(() => null);
+  return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-// tiny HTML entity decoder
+// tiny HTML entity decoder (enough for our text snippets)
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -55,17 +59,6 @@ function decodeEntities(s: string): string {
 
 /* ------------------------ DOM extraction (Playwright) ------------------------ */
 
-async function waitForPriceOrUnavailable(page: PWPage) {
-  // Wait up to ~6s for either a price token or the “Currently Unavailable” ribbon
-  await page.waitForFunction(() => {
-    const scope = document.querySelector('main') || document.body;
-    const txt = (scope?.textContent || '').toLowerCase();
-    if (txt.includes('currently unavailable') || txt.includes('out of stock')) return true;
-    // quick scan for currency tokens
-    return /£\s?\d|€\s?\d|\$\s?\d|\bGBP\b|\bEUR\b|\bUSD\b/.test(scope?.textContent || '');
-  }, { timeout: 6_000 }).catch(() => {});
-}
-
 async function extractDescription(page: PWPage): Promise<string | null> {
   const raw =
     (await page
@@ -73,9 +66,12 @@ async function extractDescription(page: PWPage): Promise<string | null> {
         [
           'section:has(h2:has-text("Summary")) p',
           'section:has(h3:has-text("Summary")) p',
+          'section:has(h2:has-text("Summary")) div',
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
+          // very generic fallback in summary-like sections
+          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
         ].join(','),
         nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
@@ -83,6 +79,7 @@ async function extractDescription(page: PWPage): Promise<string | null> {
     (await page
       .evaluate(() => {
         const root = (document.querySelector('main') || document.body)!;
+
         const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find(h =>
           /summary|description/i.test(h.textContent || ''),
         );
@@ -97,6 +94,7 @@ async function extractDescription(page: PWPage): Promise<string | null> {
             if (text.length >= 40) return text.slice(0, 1500);
           }
         }
+
         const meta =
           document.querySelector<HTMLMetaElement>('meta[name="description"]') ||
           document.querySelector<HTMLMetaElement>('meta[property="og:description"]');
@@ -114,17 +112,14 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
   const raw =
     (await page
       .evaluate(() => {
-        const absolutize = (u: string) => { try { return new URL(u, location.href).toString(); } catch { return null; } };
+        const absolutize = (u: string) => {
+          try { return new URL(u, location.href).toString(); } catch { return null; }
+        };
         const isLogo = (u: string, alt = '') =>
-          !u || /\.svg(\?|$)/i.test(u) ||
+          !u ||
+          /\.svg(\?|$)/i.test(u) ||
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
-
-        // 0) explicit product-area images first (common on WOB)
-        const specific = document.querySelector<HTMLImageElement>(
-          'main img[class*="product"], main figure img, [data-testid*="image"] img, picture img'
-        );
-        if (specific?.src && !isLogo(specific.src, specific.alt || '')) return absolutize(specific.src);
 
         // 1) OG/Twitter
         const og =
@@ -178,14 +173,19 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Price extractor:
- *  - JSON-LD `offers` (min price) if present.
- *  - Else scan visible controls/labels/basket areas and pick **lowest** currency value.
- *  - Also return `unavailable` flag when the page says so.
+ * Price extractor hardened for WOB:
+ *  - JSON-LD `offers`
+ *  - Microdata/meta (`[itemprop=price]`, `meta[property="product:price:amount"]`, `[data-price]`)
+ *  - WOB DOM nodes (`.formatted-price`, `.price`, buttons/labels near “Select Condition”)
+ *  - Raw HTML regex (fallback)
+ * Chooses the lowest sane price.
  */
 async function extractPriceAndCurrency(
   page: PWPage,
-): Promise<{ price: number | null; currency: string | null; unavailable: boolean }> {
+): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
+  const probes: string[] = [];
+
+  // 0) Unavailable early
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -193,8 +193,25 @@ async function extractPriceAndCurrency(
       return txt.includes('currently unavailable') || txt.includes('out of stock');
     })
     .catch(() => false);
+  if (unavailable) probes.push('flag:unavailable');
 
-  // JSON-LD first
+  // helpers
+  const parseMoneyList = (list: Array<{ v: number; c: string | null }>) => {
+    const sane = list.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 1000);
+    if (!sane.length) return { price: null, currency: null as string | null };
+    sane.sort((a, b) => a.v - b.v);
+    return { price: sane[0].v, currency: sane[0].c || null };
+  };
+  const CUR = [
+    { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
+    { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
+    { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
+    { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
+    { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
+    { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
+  ];
+
+  // 1) JSON-LD
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -202,14 +219,12 @@ async function extractPriceAndCurrency(
         const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         let best: number | null = null;
         let cur: string | null = null;
-
         const touchOffer = (o: any) => {
           const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
-          const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
+          const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
           const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
           if (p != null && p > 0 && p < 1000 && (best == null || p < best)) { best = p; cur = (c || cur); }
         };
-
         for (const s of scripts) {
           const data = JSON.parse(s.textContent || 'null');
           const list = Array.isArray(data) ? data : [data];
@@ -227,62 +242,106 @@ async function extractPriceAndCurrency(
       return out;
     })
     .catch(() => ({ price: null, currency: null }));
-
   if (fromLd.price != null) {
-    return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable };
+    probes.push('price:ld-json');
+    return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable, probes };
   }
 
-  // DOM text scanning → min price
-  const fromDom = await page
+  // 2) Microdata / meta
+  const fromMicro = await page
     .evaluate(() => {
+      const found: Array<{ v: number; c: string | null }> = [];
+      const money = (s: string) => {
+        const t = s.replace(/\s+/g, ' ').trim();
+        const m = t.match(/(\d+(?:\.\d{1,2})?)/);
+        return m ? Number(m[1]) : null;
+      };
+      const push = (v: number | null, c: string | null) => { if (v != null) found.push({ v, c }); };
+
+      // itemprop=price (schema.org)
+      document.querySelectorAll('[itemprop="price"]').forEach(el => {
+        const v = Number((el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''));
+        const c = el.getAttribute('content') && el.getAttribute('content')!.includes('£') ? 'GBP' : null;
+        if (Number.isFinite(v)) found.push({ v, c });
+      });
+
+      // data-price
+      document.querySelectorAll<HTMLElement>('[data-price]').forEach(el => {
+        const raw = el.dataset.price || '';
+        const v = Number(String(raw).replace(/[^\d.]/g, ''));
+        if (Number.isFinite(v)) found.push({ v, c: null });
+      });
+
+      // meta tags
+      const metaAmt =
+        document.querySelector<HTMLMetaElement>('meta[property="product:price:amount"]') ||
+        document.querySelector<HTMLMetaElement>('meta[name="product:price:amount"]');
+      const metaCur =
+        document.querySelector<HTMLMetaElement>('meta[property="product:price:currency"]') ||
+        document.querySelector<HTMLMetaElement>('meta[name="product:price:currency"]');
+      if (metaAmt) {
+        const v = Number((metaAmt.content || '').replace(/[^\d.]/g, ''));
+        if (Number.isFinite(v)) found.push({ v, c: (metaCur?.content || null) as any });
+      }
+
+      return found;
+    })
+    .catch(() => [] as Array<{ v: number; c: string | null }>);
+  if (fromMicro.length) {
+    probes.push('price:micro/meta');
+    const pick = (list: Array<{ v: number; c: string | null }>) => {
+      const sane = list.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 1000);
+      if (!sane.length) return { price: null, currency: null as string | null };
+      sane.sort((a, b) => a.v - b.v);
+      return { price: sane[0].v, currency: sane[0].c || null };
+    };
+    const res = pick(fromMicro);
+    if (res.price != null) return { ...res, unavailable, probes };
+  }
+
+  // 3) WOB DOM (buttons, labels, formatted spans)
+  const fromDom = await page
+    .evaluate((CURSER) => {
       const scope = document.querySelector('main') || document.body;
-
+      const pull = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
       const buckets: string[] = [];
-      const grab = (el: Element | null | undefined) =>
-        (el?.textContent || '').replace(/\s+/g, ' ').trim();
 
-      // condition radios/options/buttons + pricey classes
-      scope.querySelectorAll(
-        '[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"], [data-qa*="condition"]'
-      ).forEach(el => {
-        const t = grab(el);
+      // obvious price nodes
+      scope.querySelectorAll('.formatted-price, .price, [data-testid*="price"]').forEach(el => {
+        const t = pull(el);
         if (t) buckets.push(t);
       });
 
-      // near “Select Condition”
+      // option/radio/btn/label aggregates (conditions)
+      scope
+        .querySelectorAll('[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"]')
+        .forEach(el => {
+          const t = pull(el);
+          if (t) buckets.push(t);
+        });
+
+      // area near “Select Condition”
       const label = Array.from(scope.querySelectorAll('*')).find(n =>
         /select\s*condition/i.test(n.textContent || ''),
       );
       if (label) {
-        const near = grab(label.closest('section') || label.parentElement || undefined);
+        const near = pull(label.closest('section') || label.parentElement || undefined);
         if (near) buckets.push(near);
       }
 
-      // near Basket
+      // basket area
       const basket = Array.from(scope.querySelectorAll('button, a')).find(n =>
         /add\s*to\s*basket/i.test(n.textContent || ''),
       );
       if (basket) {
-        const near = grab(basket.closest('section') || basket.parentElement || undefined);
+        const near = pull(basket.closest('section') || basket.parentElement || undefined);
         if (near) buckets.push(near);
       }
 
-      // fallback to whole scope
-      if (!buckets.length) buckets.push(grab(scope));
-
-      const CUR = [
-        { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-        { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-        { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-        { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-        { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-        { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-      ];
-
-      const found: Array<{ v: number; c: string }> = [];
+      const found: Array<{ v: number; c: string | null }> = [];
       for (const s of buckets) {
-        for (const { rx, code } of CUR) {
-          rx.lastIndex = 0;
+        for (const { rx, code } of CURSER as Array<{ rx: RegExp; code: string }>) {
+          (rx as any).lastIndex = 0;
           let m: RegExpExecArray | null;
           while ((m = rx.exec(s))) {
             const n = Number(m[1]);
@@ -290,14 +349,35 @@ async function extractPriceAndCurrency(
           }
         }
       }
+      return found;
+    }, CUR)
+    .catch(() => [] as Array<{ v: number; c: string | null }>);
+  if (fromDom.length) {
+    probes.push('price:wob-dom');
+    const res = parseMoneyList(fromDom);
+    if (res.price != null) return { ...res, unavailable, probes };
+  }
 
-      if (!found.length) return { price: null, currency: null as string | null };
-      found.sort((a, b) => a.v - b.v);
-      return { price: found[0].v, currency: found[0].c as string | null };
-    })
-    .catch(() => ({ price: null, currency: null }));
+  // 4) Raw HTML fallback (catch weird render states)
+  const html = await page.content().catch(() => '');
+  if (html) {
+    const found: Array<{ v: number; c: string | null }> = [];
+    for (const { rx, code } of CUR) {
+      let m: RegExpExecArray | null;
+      while ((m = rx.exec(html))) {
+        const n = Number(m[1]);
+        if (isFinite(n) && n > 0 && n < 1000) found.push({ v: n, c: code });
+      }
+    }
+    if (found.length) {
+      probes.push('price:html-fallback');
+      const res = parseMoneyList(found);
+      if (res.price != null) return { ...res, unavailable, probes };
+    }
+  }
 
-  return { price: fromDom.price, currency: fromDom.currency, unavailable };
+  probes.push('price:none');
+  return { price: null, currency: null, unavailable, probes };
 }
 
 /* --------------------------------- service -------------------------------- */
@@ -332,6 +412,7 @@ export class ScraperService {
     let ratingAverage: number | null = null;
     let status: number | null = null;
     let unavailable = false;
+    let priceProbes: string[] = [];
 
     const launchArgs = [
       '--no-sandbox',
@@ -351,7 +432,8 @@ export class ScraperService {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         extraHTTPHeaders: {
           'Accept-Language': 'en-GB,en;q=0.9',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Referer': new URL(product.sourceUrl).origin + '/',
         },
         locale: 'en-GB',
       });
@@ -377,18 +459,17 @@ export class ScraperService {
         .catch(() => undefined);
 
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
-
-      // Wait for price/unavailable token so we don't read too early
-      await waitForPriceOrUnavailable(page);
+      await page.waitForTimeout(300);
 
       // ---- extract fields ----
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
-      const { price, currency, unavailable: unavail } = await extractPriceAndCurrency(page);
-      priceNum = price;
-      currencyDetected = currency;
-      unavailable = unavail;
+      const priceRes = await extractPriceAndCurrency(page);
+      priceNum = priceRes.price;
+      currencyDetected = priceRes.currency;
+      unavailable = priceRes.unavailable;
+      priceProbes = priceRes.probes;
 
       // Rating (best effort)
       const ratingText =
@@ -404,7 +485,7 @@ export class ScraperService {
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
         priceNum ?? 'na'
-      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'}`,
+      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
     let changedProduct = false;
@@ -414,6 +495,7 @@ export class ScraperService {
       changedProduct = true;
     }
 
+    // If page is unavailable, DON'T overwrite a previous valid price.
     if (!unavailable) {
       if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
         if (product.price !== priceNum) {
@@ -421,10 +503,8 @@ export class ScraperService {
           changedProduct = true;
         }
       }
-    } else {
-      // if unavailable, do not clobber a previous known price
-      this.log.warn(`Page marked unavailable; keeping existing price=${product.price ?? 'null'}`);
-      if (product.price == null) product.price = null;
+    } else if (product.price == null) {
+      product.price = null;
     }
 
     if (currencyDetected && product.currency !== currencyDetected) {
@@ -442,7 +522,7 @@ export class ScraperService {
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable };
+    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable, priceProbes };
     detail.lastScrapedAt = new Date();
 
     await this.details.save(detail);
