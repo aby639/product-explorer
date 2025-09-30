@@ -1,4 +1,3 @@
-// backend/src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -173,12 +172,10 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Price extractor hardened for WOB:
- *  - JSON-LD `offers`
- *  - Microdata/meta (`[itemprop=price]`, `meta[property="product:price:amount"]`, `[data-price]`)
- *  - WOB DOM nodes (`.formatted-price`, `.price`, buttons/labels near “Select Condition”)
- *  - Raw HTML regex (fallback)
- * Chooses the lowest sane price.
+ * Price extractor hardened for World of Books:
+ *  - Prefer **selected condition** price inside the condition options
+ *  - Else take the **lowest in-stock** condition
+ *  - Else fall back to LD-JSON / microdata / DOM / HTML
  */
 async function extractPriceAndCurrency(
   page: PWPage,
@@ -195,23 +192,50 @@ async function extractPriceAndCurrency(
     .catch(() => false);
   if (unavailable) probes.push('flag:unavailable');
 
-  // helpers
-  const parseMoneyList = (list: Array<{ v: number; c: string | null }>) => {
-    const sane = list.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 1000);
-    if (!sane.length) return { price: null, currency: null as string | null };
-    sane.sort((a, b) => a.v - b.v);
-    return { price: sane[0].v, currency: sane[0].c || null };
+  // helper
+  const parseMoney = (s: string) => {
+    const m = s.replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+    return m ? Number(m[1]) : null;
   };
-  const CUR = [
-    { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-    { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
-    { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-    { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
-    { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-    { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
-  ];
 
-  // 1) JSON-LD
+  // 1) World of Books – condition tiles (the green “Very Good / Well Read” boxes)
+  // Try to read the *selected* one first, else pick the lowest in-stock tile.
+  const fromWobConditions = await page.evaluate(() => {
+    const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
+    const container =
+      document.querySelector('.product-condition__options') ||
+      document.querySelector('[data-testid="product-conditions"]') ||
+      document.body;
+
+    const tiles = Array.from(container.querySelectorAll<HTMLElement>('.product-condition__option, [data-testid*="condition"]'));
+    if (!tiles.length) return null as null | { price: number; currency: string };
+
+    const parseTile = (t: HTMLElement) => {
+      const text = grab(t);
+      const priceMatch = text.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
+      const v = priceMatch ? Number(priceMatch[2]) : null;
+      const c = priceMatch ? 'GBP' : null;
+      const selected = t.classList.contains('is-selected') || t.getAttribute('aria-checked') === 'true';
+      const disabled = t.getAttribute('aria-disabled') === 'true' || /out of stock/i.test(text);
+      return { v, c, selected, disabled };
+    };
+
+    const parsed = tiles.map(parseTile).filter(x => x.v && !x.disabled) as Array<{ v: number; c: string; selected: boolean }>;
+    if (!parsed.length) return null;
+
+    const sel = parsed.find(x => x.selected);
+    if (sel) return { price: sel.v, currency: sel.c };
+
+    parsed.sort((a, b) => a.v - b.v);
+    return { price: parsed[0].v, currency: parsed[0].c };
+  }).catch(() => null);
+
+  if (fromWobConditions && Number.isFinite(fromWobConditions.price)) {
+    probes.push('price:wob-conditions');
+    return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable, probes };
+  }
+
+  // 2) JSON-LD (fallbacks)
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -247,7 +271,7 @@ async function extractPriceAndCurrency(
     return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable, probes };
   }
 
-  // 2) Microdata / meta
+  // 3) Microdata / meta
   const fromMicro = await page
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = [];
@@ -289,90 +313,40 @@ async function extractPriceAndCurrency(
     .catch(() => [] as Array<{ v: number; c: string | null }>);
   if (fromMicro.length) {
     probes.push('price:micro/meta');
-    const pick = (list: Array<{ v: number; c: string | null }>) => {
-      const sane = list.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 1000);
-      if (!sane.length) return { price: null, currency: null as string | null };
-      sane.sort((a, b) => a.v - b.v);
-      return { price: sane[0].v, currency: sane[0].c || null };
-    };
-    const res = pick(fromMicro);
-    if (res.price != null) return { ...res, unavailable, probes };
+    const sane = fromMicro.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 1000);
+    sane.sort((a, b) => a.v - b.v);
+    const pick = sane[0];
+    if (pick) return { price: pick.v, currency: pick.c, unavailable, probes };
   }
 
-  // 3) WOB DOM (buttons, labels, formatted spans)
+  // 4) Raw DOM scrape (generic)
   const fromDom = await page
-    .evaluate((CURSER) => {
+    .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
-      const pull = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
-      const buckets: string[] = [];
-
-      // obvious price nodes
+      const texts: string[] = [];
       scope.querySelectorAll('.formatted-price, .price, [data-testid*="price"]').forEach(el => {
-        const t = pull(el);
-        if (t) buckets.push(t);
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t) texts.push(t);
       });
-
-      // option/radio/btn/label aggregates (conditions)
-      scope
-        .querySelectorAll('[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"]')
-        .forEach(el => {
-          const t = pull(el);
-          if (t) buckets.push(t);
-        });
-
-      // area near “Select Condition”
-      const label = Array.from(scope.querySelectorAll('*')).find(n =>
-        /select\s*condition/i.test(n.textContent || ''),
-      );
-      if (label) {
-        const near = pull(label.closest('section') || label.parentElement || undefined);
-        if (near) buckets.push(near);
-      }
-
-      // basket area
-      const basket = Array.from(scope.querySelectorAll('button, a')).find(n =>
-        /add\s*to\s*basket/i.test(n.textContent || ''),
-      );
-      if (basket) {
-        const near = pull(basket.closest('section') || basket.parentElement || undefined);
-        if (near) buckets.push(near);
-      }
-
-      const found: Array<{ v: number; c: string | null }> = [];
-      for (const s of buckets) {
-        for (const { rx, code } of CURSER as Array<{ rx: RegExp; code: string }>) {
-          (rx as any).lastIndex = 0;
-          let m: RegExpExecArray | null;
-          while ((m = rx.exec(s))) {
-            const n = Number(m[1]);
-            if (isFinite(n) && n > 0 && n < 1000) found.push({ v: n, c: code });
-          }
-        }
-      }
-      return found;
-    }, CUR)
-    .catch(() => [] as Array<{ v: number; c: string | null }>);
+      return texts;
+    })
+    .catch(() => [] as string[]);
   if (fromDom.length) {
-    probes.push('price:wob-dom');
-    const res = parseMoneyList(fromDom);
-    if (res.price != null) return { ...res, unavailable, probes };
+    const joined = fromDom.join(' • ');
+    const m = joined.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
+    if (m) {
+      probes.push('price:dom-generic');
+      return { price: Number(m[2]), currency: 'GBP', unavailable, probes };
+    }
   }
 
-  // 4) Raw HTML fallback (catch weird render states)
+  // 5) Raw HTML fallback
   const html = await page.content().catch(() => '');
   if (html) {
-    const found: Array<{ v: number; c: string | null }> = [];
-    for (const { rx, code } of CUR) {
-      let m: RegExpExecArray | null;
-      while ((m = rx.exec(html))) {
-        const n = Number(m[1]);
-        if (isFinite(n) && n > 0 && n < 1000) found.push({ v: n, c: code });
-      }
-    }
-    if (found.length) {
+    const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
+    if (m) {
       probes.push('price:html-fallback');
-      const res = parseMoneyList(found);
-      if (res.price != null) return { ...res, unavailable, probes };
+      return { price: Number(m[2]), currency: 'GBP', unavailable, probes };
     }
   }
 
@@ -385,7 +359,11 @@ async function extractPriceAndCurrency(
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name);
+
+  // in-memory per-product mutex + “last attempt” throttle (protects against SSR double hits)
   private inFlight = new Map<string, Promise<ProductDetail>>();
+  private lastAttempt = new Map<string, number>();
+  private readonly ATTEMPT_COOLDOWN_MS = 15_000; // 15s hard gate between scrapes *even if* refresh=true
 
   constructor(
     @InjectRepository(Product) private readonly products: Repository<Product>,
@@ -393,9 +371,24 @@ export class ScraperService {
   ) {}
 
   async refreshProduct(productId: string): Promise<ProductDetail> {
+    const now = Date.now();
+    const last = this.lastAttempt.get(productId) ?? 0;
+    if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
+      return this.inFlight.get(productId)!;
+    }
+    if (now - last < this.ATTEMPT_COOLDOWN_MS && !this.inFlight.has(productId)) {
+      // Too soon since last scrape, just return existing detail
+      const existing = await this.details.findOne({
+        where: { product: { id: productId } },
+        relations: { product: true },
+      });
+      if (existing) return existing;
+    }
+
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
     const work = this._refreshProduct(productId).finally(() => this.inFlight.delete(productId));
     this.inFlight.set(productId, work);
+    this.lastAttempt.set(productId, now);
     return work;
   }
 
@@ -467,7 +460,7 @@ export class ScraperService {
 
       const priceRes = await extractPriceAndCurrency(page);
       priceNum = priceRes.price;
-      currencyDetected = priceRes.currency;
+      currencyDetected = priceRes.currency ?? 'GBP';
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
