@@ -46,13 +46,15 @@ function decodeEntities(s: string): string {
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
-  return named.replace(/&#(\d+);/g, (_, n) => {
-    const code = Number(n);
-    return Number.isFinite(code) ? String.fromCharCode(code) : _;
-  }).replace(/&#x([0-9a-fA-F]+);/g, (_, hx) => {
-    const code = parseInt(hx, 16);
-    return Number.isFinite(code) ? String.fromCharCode(code) : _;
-  });
+  return named
+    .replace(/&#(\d+);/g, (_, n) => {
+      const code = Number(n);
+      return Number.isFinite(code) ? String.fromCharCode(code) : _;
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hx) => {
+      const code = parseInt(hx, 16);
+      return Number.isFinite(code) ? String.fromCharCode(code) : _;
+    });
 }
 
 /* ------------------------ DOM extraction (Playwright) ------------------------ */
@@ -174,100 +176,123 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 
 /**
  * Robust price extractor:
- *  - First tries JSON-LD offers in the live DOM (min price).
- *  - Then scans visible *condition* prices near “Select Condition”, basket area, buttons, etc.
- *  - Picks the **lowest available** (what WOB typically surfaces).
+ *  - JSON-LD `offers` (lowest price) if present.
+ *  - Else scan condition price controls & buttons and pick **lowest**.
+ *  - Detect “Currently Unavailable”.
  */
-async function extractPriceAndCurrency(page: PWPage): Promise<{ price: number | null; currency: string | null }> {
+async function extractPriceAndCurrency(
+  page: PWPage,
+): Promise<{ price: number | null; currency: string | null; unavailable: boolean }> {
+  // 0) Unavailable flag early
+  const unavailable = await page
+    .evaluate(() => {
+      const scope = document.querySelector('main') || document.body;
+      const txt = (scope.textContent || '').toLowerCase();
+      return txt.includes('currently unavailable') || txt.includes('out of stock');
+    })
+    .catch(() => false);
+
   // 1) JSON-LD
-  const fromLd = await page.evaluate(() => {
-    const out = { price: null as number | null, currency: null as string | null };
-    try {
-      const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
-      let best: number | null = null;
-      let cur: string | null = null;
+  const fromLd = await page
+    .evaluate(() => {
+      const out = { price: null as number | null, currency: null as string | null };
+      try {
+        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+        let best: number | null = null;
+        let cur: string | null = null;
 
-      const touchOffer = (o: any) => {
-        const raw = o?.price ?? o?.priceSpecification?.price;
-        const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
-        const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
-        if (p != null && (best == null || p < best)) { best = p; cur = (c || cur); }
-      };
+        const touchOffer = (o: any) => {
+          const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
+          const p = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : null;
+          const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
+          if (p != null && p > 0 && p < 1000 && (best == null || p < best)) { best = p; cur = (c || cur); }
+        };
 
-      for (const s of scripts) {
-        const data = JSON.parse(s.textContent || 'null');
-        const list = Array.isArray(data) ? data : [data];
-        for (const item of list) {
-          const t = item?.['@type'];
-          const types = Array.isArray(t) ? t : t ? [t] : [];
-          if (!types.some((x: string) => /product|book/i.test(x))) continue;
-          const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
-          for (const o of offers) touchOffer(o);
+        for (const s of scripts) {
+          const data = JSON.parse(s.textContent || 'null');
+          const list = Array.isArray(data) ? data : [data];
+          for (const item of list) {
+            const t = item?.['@type'];
+            const types = Array.isArray(t) ? t : t ? [t] : [];
+            if (!types.some((x: string) => /product|book/i.test(x))) continue;
+            const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
+            for (const o of offers) touchOffer(o);
+          }
         }
-      }
-      out.price = best;
-      out.currency = cur;
-    } catch {}
-    return out;
-  });
+        out.price = best;
+        out.currency = cur;
+      } catch {}
+      return out;
+    })
+    .catch(() => ({ price: null, currency: null }));
 
   if (fromLd.price != null) {
-    return { price: fromLd.price, currency: fromLd.currency ?? null };
+    return { price: fromLd.price, currency: fromLd.currency ?? null, unavailable };
   }
 
-  // 2) Visible text in likely regions → pick MIN
-  const fromDom = await page.evaluate(() => {
-    const scope = document.querySelector('main') || document.body;
-    const texts: string[] = [];
+  // 2) Visible condition prices → pick MIN
+  const fromDom = await page
+    .evaluate(() => {
+      const scope = document.querySelector('main') || document.body;
+      const pullText = (el: Element | null | undefined) =>
+        (el?.textContent || '').replace(/\s+/g, ' ').trim();
 
-    const pullText = (el: Element | null | undefined) => {
-      if (!el) return;
-      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (t) texts.push(t);
-    };
+      const buckets: string[] = [];
 
-    // condition option buttons/labels
-    scope.querySelectorAll('[role="radio"], button, label, [data-testid*="condition"]').forEach(pullText);
-    // area near “Select Condition”
-    const label = Array.from(scope.querySelectorAll('*')).find(n => /select\s*condition/i.test(n.textContent || ''));
-    pullText(label?.closest('section') || label?.parentElement);
-    // basket area often repeats price
-    const basket = Array.from(scope.querySelectorAll('button, a')).find(n => /add\s*to\s*basket/i.test(n.textContent || ''));
-    pullText(basket?.closest('section') || basket?.parentElement);
+      // likely condition/option elements
+      scope
+        .querySelectorAll('[role="radio"], [role="option"], button, label, [data-testid*="condition"], [class*="price"]')
+        .forEach(el => {
+          const t = pullText(el);
+          if (t) buckets.push(t);
+        });
 
-    // generic likely price nodes
-    scope.querySelectorAll('[data-testid*="price"], .price, [itemprop="price"], [class*="price"]').forEach(pullText);
+      // area near “Select Condition”
+      const label = Array.from(scope.querySelectorAll('*')).find(n =>
+        /select\s*condition/i.test(n.textContent || ''),
+      );
+      if (label) {
+        const near = pullText(label.closest('section') || label.parentElement || undefined);
+        if (near) buckets.push(near);
+      }
 
-    // fallback: whole scope text
-    if (!texts.length) pullText(scope);
+      // basket area
+      const basket = Array.from(scope.querySelectorAll('button, a')).find(n =>
+        /add\s*to\s*basket/i.test(n.textContent || ''),
+      );
+      if (basket) {
+        const near = pullText(basket.closest('section') || basket.parentElement || undefined);
+        if (near) buckets.push(near);
+      }
 
-    const CURRENCIES: Array<{ rx: RegExp; code: 'GBP'|'USD'|'EUR' }> = [
-      { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
-      { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' },
-      { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
-      { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' },
-      { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
-      { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' },
-    ];
+      const CUR = [
+        { rx: /£\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
+        { rx: /\bGBP\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'GBP' as const },
+        { rx: /€\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
+        { rx: /\bEUR\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'EUR' as const },
+        { rx: /\$\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
+        { rx: /\bUSD\b\s?(\d+(?:\.\d{1,2})?)/g, code: 'USD' as const },
+      ];
 
-    const found: Array<{ value: number; code: string }> = [];
-    for (const s of texts) {
-      for (const { rx, code } of CURRENCIES) {
-        let m: RegExpExecArray | null;
-        rx.lastIndex = 0;
-        while ((m = rx.exec(s))) {
-          const n = Number(m[1]);
-          if (isFinite(n) && n > 0 && n < 1000) found.push({ value: n, code });
+      const found: Array<{ v: number; c: string }> = [];
+      for (const s of buckets) {
+        for (const { rx, code } of CUR) {
+          rx.lastIndex = 0;
+          let m: RegExpExecArray | null;
+          while ((m = rx.exec(s))) {
+            const n = Number(m[1]);
+            if (isFinite(n) && n > 0 && n < 1000) found.push({ v: n, c: code });
+          }
         }
       }
-    }
 
-    if (!found.length) return { price: null, currency: null };
-    found.sort((a, b) => a.value - b.value);
-    return { price: found[0].value, currency: found[0].code };
-  });
+      if (!found.length) return { price: null, currency: null as string | null };
+      found.sort((a, b) => a.v - b.v);
+      return { price: found[0].v, currency: found[0].c as string | null };
+    })
+    .catch(() => ({ price: null, currency: null }));
 
-  return fromDom;
+  return { price: fromDom.price, currency: fromDom.currency, unavailable };
 }
 
 /* --------------------------------- service -------------------------------- */
@@ -301,6 +326,7 @@ export class ScraperService {
     let currencyDetected: string | null = null;
     let ratingAverage: number | null = null;
     let status: number | null = null;
+    let unavailable = false;
 
     const launchArgs = [
       '--no-sandbox',
@@ -352,9 +378,10 @@ export class ScraperService {
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
-      const { price, currency } = await extractPriceAndCurrency(page);
+      const { price, currency, unavailable: unavail } = await extractPriceAndCurrency(page);
       priceNum = price;
       currencyDetected = currency;
+      unavailable = unavail;
 
       // Rating (best effort)
       const ratingText =
@@ -370,7 +397,7 @@ export class ScraperService {
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
         priceNum ?? 'na'
-      } currency=${currencyDetected ?? 'na'} rating=${ratingAverage ?? 'na'}`,
+      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'}`,
     );
 
     let changedProduct = false;
@@ -380,11 +407,17 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
-      if (product.price !== priceNum) {
-        product.price = priceNum!;
-        changedProduct = true;
+    // If page is unavailable, DON'T overwrite a previous valid price.
+    if (!unavailable) {
+      if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && (priceNum as number) < 1000) {
+        if (product.price !== priceNum) {
+          product.price = priceNum!;
+          changedProduct = true;
+        }
       }
+    } else if (product.price == null) {
+      // keep null (so UI can show "Unavailable")
+      product.price = null;
     }
 
     if (currencyDetected && product.currency !== currencyDetected) {
@@ -400,9 +433,9 @@ export class ScraperService {
     });
     if (!detail) detail = this.details.create({ product });
 
-    detail.description = description || null;
+    detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-    detail.specs = { ...(detail.specs || {}), lastStatus: status };
+    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable };
     detail.lastScrapedAt = new Date();
 
     await this.details.save(detail);
