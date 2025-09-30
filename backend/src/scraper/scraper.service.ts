@@ -2,18 +2,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { chromium, devices } from 'playwright';
+import { chromium, devices, Browser, Page } from 'playwright';
 
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 
-async function gotoWithRetry(page: import('playwright').Page, url: string) {
+async function gotoWithRetry(page: Page, url: string) {
   let attempt = 0;
   while (attempt < 3) {
     try {
       const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      if (resp?.status() === 429 && attempt < 2) {
-        await page.waitForTimeout(500 * Math.pow(2, attempt));
+      if (resp && [429, 403, 503].includes(resp.status()) && attempt < 2) {
+        await page.waitForTimeout(700 * Math.pow(2, attempt));
         attempt++;
         continue;
       }
@@ -23,15 +23,12 @@ async function gotoWithRetry(page: import('playwright').Page, url: string) {
       attempt++;
     }
   }
-  // Final best-effort attempt
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name);
-
-  // Prevent duplicate parallel scrapes per product
   private inFlight = new Map<string, Promise<ProductDetail>>();
 
   constructor(
@@ -39,14 +36,9 @@ export class ScraperService {
     @InjectRepository(ProductDetail) private readonly details: Repository<ProductDetail>,
   ) {}
 
-  /** Loads the product.sourceUrl, extracts detail, and persists it. */
   async refreshProduct(productId: string): Promise<ProductDetail> {
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
-
-    const work = this._refreshProduct(productId).finally(() => {
-      this.inFlight.delete(productId);
-    });
-
+    const work = this._refreshProduct(productId).finally(() => this.inFlight.delete(productId));
     this.inFlight.set(productId, work);
     return work;
   }
@@ -57,62 +49,57 @@ export class ScraperService {
 
     this.log.log(`Scraping ${product.sourceUrl}`);
 
-    // ---- IMPORTANT FOR RENDER / PaaS ----
-    // These flags make Chromium start reliably in containerized sandboxes.
-    const launchArgs = [
+    const browserArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--single-process',
-      '--no-zygote',
+      '--no-zygote'
     ];
 
-    let browser: import('playwright').Browser | null = null;
+    let browser: Browser | null = null;
     try {
-      browser = await chromium.launch({ headless: true, args: launchArgs });
+      browser = await chromium.launch({ headless: true, args: browserArgs });
 
-      // Avoid TS2783: remove UA from device profile, then set ours explicitly
+      // Realistic UK desktop profile
       const { userAgent: _ignored, ...desktopChrome } = devices['Desktop Chrome'];
       const context = await browser.newContext({
         ...desktopChrome,
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        locale: 'en-GB',
+        timezoneId: 'Europe/London',
+        extraHTTPHeaders: {
+          'Accept-Language': 'en-GB,en;q=0.9',
+          'Sec-CH-UA-Platform': '"Windows"',
+        },
       });
-      const page = await context.newPage();
 
-      // Small jitter to be polite
-      await page.waitForTimeout(120 + Math.floor(Math.random() * 200));
+      const page = await context.newPage();
+      await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
 
       const resp = await gotoWithRetry(page, product.sourceUrl);
-      if (resp && resp.status() >= 400 && resp.status() !== 429) {
+      if (resp && resp.status() >= 400 && ![429].includes(resp.status())) {
         this.log.warn(`Non-OK response ${resp.status()} for ${product.sourceUrl}`);
       }
 
-      // Ensure main content is present; then give it a beat for late DOM tweaks
-      await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
-      await page.waitForTimeout(300);
+      await page.waitForSelector('main, body', { timeout: 12_000 }).catch(() => undefined);
+      await page.waitForTimeout(500);
 
-      // -------------------------------
-      // DESCRIPTION (tolerant strategy)
-      // -------------------------------
+      // ===== DESCRIPTION =====
       const description =
         (await page
-          .$$eval(
+          .locator(
             [
               'section:has(h2:has-text("Summary")) p',
               'section:has(h3:has-text("Summary")) p',
-              'section:has(h2:has-text("Summary")) div',
               '#description p, #description div',
               '.ProductDescription p, .product-description p',
-              '[data-testid="product-description"] p, [data-testid="product-description"] div',
+              '[data-testid="product-description"] p, [data-testid="product-description"] div'
             ].join(','),
-            (nodes) =>
-              nodes
-                .map((n) => (n.textContent || '').trim())
-                .filter(Boolean)
-                .join('\n')
-                .trim(),
           )
+          .allTextContents()
+          .then((arr) => arr.map((s) => s.trim()).filter(Boolean).join('\n').trim())
           .catch(() => '')) ||
         (await page
           .evaluate(() => {
@@ -139,35 +126,33 @@ export class ScraperService {
           .catch(() => '')) ||
         '';
 
-      // -------------------------------
-      // RATING (best effort)
-      // -------------------------------
+      // ===== RATING =====
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       const ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
 
-      // -------------------------------
-      // IMAGE (logo-proof, robust)
-      // -------------------------------
+      // ===== IMAGE =====
       const rawImg = await page
         .evaluate((titleForBoost) => {
           const absolutize = (u: string) => {
-            try {
-              return new URL(u, location.href).toString();
-            } catch {
-              return null;
-            }
+            try { return new URL(u, location.href).toString(); } catch { return null; }
           };
-
           const isProbablyLogo = (u: string, alt = '') =>
             !u ||
             /\.svg(\?|$)/i.test(u) ||
             /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
             /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-          // 1) OG/Twitter
+          // preload hero
+          const preload = document.querySelector<HTMLLinkElement>('link[rel="preload"][as="image"]')?.href;
+          if (preload && !isProbablyLogo(preload)) {
+            const abs = absolutize(preload);
+            if (abs && !isProbablyLogo(abs)) return abs;
+          }
+
+          // OG/Twitter
           const og =
             document
               .querySelector<HTMLMetaElement>(
@@ -179,7 +164,7 @@ export class ScraperService {
             if (abs && !isProbablyLogo(abs)) return abs;
           }
 
-          // 2) JSON-LD Product/Book
+          // JSON-LD
           const ldList = Array.from(
             document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
           );
@@ -188,48 +173,36 @@ export class ScraperService {
               const json = JSON.parse(s.textContent || '{}');
               const types = Array.isArray(json['@type']) ? json['@type'] : [json['@type']];
               if (types?.some((t) => /product|book/i.test(t))) {
-                const cand =
-                  (Array.isArray(json.image) ? json.image[0] : json.image) ||
-                  json?.offers?.image ||
-                  null;
+                const cand = (Array.isArray(json.image) ? json.image[0] : json.image) || json?.offers?.image || null;
                 if (cand && !isProbablyLogo(cand)) {
                   const abs = absolutize(cand);
                   if (abs && !isProbablyLogo(abs)) return abs;
                 }
               }
-            } catch {
-              /* ignore bad JSON-LD */
-            }
+            } catch {}
           }
 
-          // 3) DOM candidates in <main>
+          // DOM candidates
           const root = document.querySelector('main') || document.body;
           const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
           const candidates = imgs
             .map((img) => {
               const srcset = img.getAttribute('srcset');
               const srcFromSet =
-                srcset
-                  ?.split(',')
-                  ?.map((s) => s.trim().split(' ')[0])
-                  ?.filter(Boolean)
-                  ?.pop() || null;
-
+                srcset?.split(',')?.map((s) => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
               const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
               const alt = (img.getAttribute('alt') || '').toLowerCase();
               const r = img.getBoundingClientRect();
               const area = r.width * r.height;
               const ratio = r.height / Math.max(1, r.width);
-
               return { src, alt, area, ratio, w: r.width, h: r.height };
             })
             .filter((c) => c.src && !isProbablyLogo(c.src, c.alt))
-            .filter((c) => c.w >= 180 && c.h >= 180); // discard tiny assets
+            .filter((c) => c.w >= 160 && c.h >= 220);
 
-          // scoring
           const title = (titleForBoost || '').toLowerCase();
           const score = (c: (typeof candidates)[number]) => {
-            const portraitBoost = c.ratio >= 1.2 ? 2 : 1; // prefer taller than wide
+            const portraitBoost = c.ratio >= 1.2 ? 2 : 1;
             const titleBoost = title && (c.alt.includes('cover') || c.alt.includes(title)) ? 1.5 : 1;
             return c.area * portraitBoost * titleBoost;
           };
@@ -242,9 +215,7 @@ export class ScraperService {
 
       const imageAbs = rawImg && product.sourceUrl ? new URL(rawImg, product.sourceUrl).toString() : null;
 
-      // -------------------------------
-      // PRICE (if present; fresher than list)
-      // -------------------------------
+      // ===== PRICE =====
       const priceText =
         (await page
           .locator(['[data-testid="price"]', '.price', '.ProductPrice', '[itemprop="price"]'].join(','))
@@ -262,9 +233,7 @@ export class ScraperService {
           ? 'USD'
           : product.currency ?? null;
 
-      // -------------------------------
-      // RECOMMENDATIONS (common carousels)
-      // -------------------------------
+      // ===== RECOMMENDATIONS =====
       const recs = await page
         .locator(
           [
@@ -288,27 +257,15 @@ export class ScraperService {
         })
         .catch(() => []);
 
-      // -------------------------------
-      // Persist changes
-      // -------------------------------
-      let changedProduct = false;
-      if (imageAbs && product.image !== imageAbs) {
-        product.image = imageAbs;
-        changedProduct = true;
-      }
+      // ===== Persist =====
+      let changed = false;
+      if (imageAbs && product.image !== imageAbs) { product.image = imageAbs; changed = true; }
       if (Number.isFinite(priceNum as number) && (priceNum as number) > 0 && product.price !== priceNum) {
-        product.price = priceNum!;
-        changedProduct = true;
+        product.price = priceNum!; changed = true;
       }
-      if (currencyDetected && product.currency !== currencyDetected) {
-        product.currency = currencyDetected;
-        changedProduct = true;
-      }
-      if (changedProduct) {
-        await this.products.save(product);
-      }
+      if (currencyDetected && product.currency !== currencyDetected) { product.currency = currencyDetected; changed = true; }
+      if (changed) await this.products.save(product);
 
-      // Upsert detail
       let detail = await this.details.findOne({
         where: { product: { id: product.id } },
         relations: { product: true },
@@ -324,11 +281,7 @@ export class ScraperService {
       this.log.log(`Saved detail for ${product.id}`);
       return detail;
     } finally {
-      try {
-        await browser?.close();
-      } catch {
-        /* ignore */
-      }
+      try { await browser?.close(); } catch {}
     }
   }
 }
