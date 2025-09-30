@@ -6,7 +6,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "seed": "ts-node -r tsconfig-paths/register scripts/seed.ts",
-    "postinstall": "npx playwright install chromium"
+    "postinstall": "npx playwright install chromium --with-deps || echo \"playwright install skipped\""
   },
   "dependencies": {
     "@crawlee/playwright": "^3.15.0",
@@ -22,6 +22,7 @@
     "class-validator": "^0.14.2",
     "crawlee": "^3.15.0",
     "pg": "^8.16.3",
+    "playwright": "^1.55.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "swagger-ui-express": "^5.0.1",
@@ -29,7 +30,6 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
-    "playwright": "^1.55.1",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3"
