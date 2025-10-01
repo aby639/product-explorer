@@ -1,3 +1,4 @@
+// src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -5,13 +6,16 @@ import { chromium, devices } from 'playwright';
 
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
+
 type PWPage = import('playwright').Page;
 
-/* ------------ helpers ------------ */
+/* --------------------------------- helpers -------------------------------- */
+
 function absolutize(base: string, u?: string | null) {
   if (!u) return null;
   try { return new URL(u, base).toString(); } catch { return null; }
 }
+
 async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0;
   while (attempt < 3) {
@@ -30,6 +34,8 @@ async function gotoWithRetry(page: PWPage, url: string) {
   }
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
+
+// tiny HTML entity decoder
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -51,7 +57,8 @@ function decodeEntities(s: string): string {
     });
 }
 
-/* ------------ DOM extraction ------------ */
+/* ------------------------ DOM extraction (Playwright) ------------------------ */
+
 async function extractDescription(page: PWPage): Promise<string | null> {
   const raw =
     (await page
@@ -93,6 +100,7 @@ async function extractDescription(page: PWPage): Promise<string | null> {
       })
       .catch(() => '')) ||
     '';
+
   const cleaned = decodeEntities(raw).replace(/\s+\n/g, '\n').trim();
   return cleaned.length ? cleaned : null;
 }
@@ -110,12 +118,14 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
+        // 1) OG/Twitter
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
+        // 2) JSON-LD Product/Book
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -132,6 +142,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           } catch {}
         }
 
+        // 3) Biggest portrait-ish IMG within main
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
@@ -158,11 +169,15 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
   return absolutize(baseUrl, raw);
 }
 
+/**
+ * Price extractor tuned for World of Books.
+ */
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
 
+  // 0) Unavailable early
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -172,6 +187,7 @@ async function extractPriceAndCurrency(
     .catch(() => false);
   if (unavailable) probes.push('flag:unavailable');
 
+  // 1) World of Books – condition tiles/buttons
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -212,9 +228,11 @@ async function extractPriceAndCurrency(
 
       if (!items.length) return null;
 
+      // Prefer selected in-stock
       const sel = items.find((x) => x.selected && !x.disabled);
       if (sel) return { price: sel.v, currency: 'GBP' };
 
+      // Else cheapest in-stock
       const inStock = items.filter((x) => !x.disabled);
       inStock.sort((a, b) => a.v - b.v);
       if (inStock[0]) return { price: inStock[0].v, currency: 'GBP' };
@@ -228,6 +246,7 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable, probes };
   }
 
+  // 2) JSON-LD (fallbacks)
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -263,14 +282,17 @@ async function extractPriceAndCurrency(
     return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable, probes };
   }
 
+  // 3) Microdata / meta
   const fromMicro = await page
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = [];
+
       document.querySelectorAll('[itemprop="price"]').forEach(el => {
         const v = Number((el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''));
         const c = /£/.test(el.getAttribute('content') || '') ? 'GBP' : null;
         if (Number.isFinite(v)) found.push({ v, c });
       });
+
       const metaAmt =
         document.querySelector<HTMLMetaElement>('meta[property="product:price:amount"]') ||
         document.querySelector<HTMLMetaElement>('meta[name="product:price:amount"]');
@@ -281,6 +303,7 @@ async function extractPriceAndCurrency(
         const v = Number((metaAmt.content || '').replace(/[^\d.]/g, ''));
         if (Number.isFinite(v)) found.push({ v, c: (metaCur?.content || null) as any });
       }
+
       return found;
     })
     .catch(() => [] as Array<{ v: number; c: string | null }>);
@@ -292,6 +315,7 @@ async function extractPriceAndCurrency(
     if (pick) return { price: pick.v, currency: pick.c ?? 'GBP', unavailable, probes };
   }
 
+  // 4) Raw DOM scrape (generic)
   const fromDom = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -312,6 +336,7 @@ async function extractPriceAndCurrency(
     }
   }
 
+  // 5) Raw HTML fallback
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
@@ -325,14 +350,16 @@ async function extractPriceAndCurrency(
   return { price: null, currency: null, unavailable, probes };
 }
 
-/* ------------ service ------------ */
+/* --------------------------------- service -------------------------------- */
+
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name);
 
+  // in-memory per-product mutex + short “last attempt” throttle
   private inFlight = new Map<string, Promise<ProductDetail>>();
   private lastAttempt = new Map<string, number>();
-  private readonly ATTEMPT_COOLDOWN_MS = 15_000;
+  private readonly ATTEMPT_COOLDOWN_MS = 15_000; // 15s
 
   constructor(
     @InjectRepository(Product) private readonly products: Repository<Product>,
@@ -343,14 +370,31 @@ export class ScraperService {
     const now = Date.now();
     const last = this.lastAttempt.get(productId) ?? 0;
 
-    if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
-    if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
+    // 1) If a scrape is already running for this product, reuse it.
+    if (this.inFlight.has(productId)) {
       return this.inFlight.get(productId)!;
     }
+
+    // 2) Within cooldown and no job running? Return the latest DB detail instead of scraping again.
+    if (now - last < this.ATTEMPT_COOLDOWN_MS) {
+      const existing = await this.details.findOne({
+        where: { product: { id: productId } },
+        relations: { product: true },
+      });
+      if (existing) return existing;
+      // If there is no detail yet, we’ll allow a scrape below.
+    }
+
+    // 3) Start a new scrape and register the promise.
+    const work = this._refreshProduct(productId)
+      .finally(() => {
+        this.inFlight.delete(productId);
+      });
+
+    this.inFlight.set(productId, work);
+    // Set lastAttempt only when we actually start work
     this.lastAttempt.set(productId, now);
 
-    const work = this._refreshProduct(productId).finally(() => this.inFlight.delete(productId));
-    this.inFlight.set(productId, work);
     return work;
   }
 
@@ -388,8 +432,8 @@ export class ScraperService {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         extraHTTPHeaders: {
           'Accept-Language': 'en-GB,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Referer': new URL(product.sourceUrl).origin + '/',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Referer: new URL(product.sourceUrl).origin + '/',
         },
         locale: 'en-GB',
       });
@@ -400,6 +444,7 @@ export class ScraperService {
       const resp = await gotoWithRetry(page, product.sourceUrl);
       status = resp?.status?.() ?? null;
 
+      // Cookie banner (best effort)
       await page
         .locator(
           [
@@ -416,6 +461,7 @@ export class ScraperService {
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
 
+      // ---- extract fields ----
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
@@ -425,6 +471,7 @@ export class ScraperService {
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
+      // Rating (best effort)
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
@@ -451,7 +498,7 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    // If unavailable OR no price detected, clear price so UI matches site.
+    // Clear price when unavailable OR when we couldn’t read a price
     if (unavailable || priceNum == null) {
       if (product.price !== null) {
         product.price = null;
@@ -487,7 +534,7 @@ export class ScraperService {
     await this.details.save(detail);
 
     if (scrapeError) {
-      // rethrow AFTER persisting detail so caller can see product but logs have the error
+      // rethrow AFTER persisting detail so the caller sees the persisted attempt
       throw scrapeError;
     }
 
