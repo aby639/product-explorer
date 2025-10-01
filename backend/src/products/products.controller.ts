@@ -13,6 +13,7 @@ import { ProductsService } from './products.service';
 export class ProductsController {
   constructor(private readonly svc: ProductsService) {}
 
+  // GET /products?category=fiction&page=1&limit=20
   @Get()
   async list(
     @Query('category') categorySlug: string,
@@ -24,6 +25,7 @@ export class ProductsController {
     return this.svc.findByCategorySlug(categorySlug, p, l);
   }
 
+  // GET /products/:id?refresh=true
   @Get(':id')
   async getOne(
     @Param('id') id: string,
@@ -35,15 +37,15 @@ export class ProductsController {
     return product;
   }
 
-  // convenience endpoint if you want a POST refresh
+  // POST /products/:id/refresh  (hard refresh endpoint used by UI “Force refresh”)
   @Post(':id/refresh')
-  async force(@Param('id') id: string) {
-    const product = await this.svc.findOneAndMaybeRefresh(id, true);
+  async refresh(@Param('id') id: string) {
+    const product = await this.svc.forceRefresh(id);
     if (!product) throw new NotFoundException('Product not found');
     return product;
   }
 
-  // ---- TEMP: POST /products/seed  (guarded with env var) ----
+  // TEMP: POST /products/seed  (only when enabled via env)
   @Post('seed')
   async seed(@Query('key') key?: string) {
     if (process.env.SEED_ENABLED !== '1') {
