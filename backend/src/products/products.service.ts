@@ -32,9 +32,7 @@ export class ProductsService {
       .leftJoin('p.category', 'c')
       .leftJoinAndSelect('p.detail', 'detail')
       .where('c.id = :cid', { cid: cat.id })
-      // keep ordering simple to avoid TypeORM alias/function quirks
-      // (if you want availability-first sort later, do it in JS)
-      .orderBy('p.title', 'ASC')
+      .orderBy('p.title', 'ASC') // ← keep simple, no SQL fn aliasing
       .skip((page - 1) * limit)
       .take(limit);
 
@@ -44,40 +42,36 @@ export class ProductsService {
 
   // GET /products/:id?refresh=true
   async findOneAndMaybeRefresh(id: string, refresh = false) {
-    let product = await this.repo.findOne({
-      where: { id },
-      relations: { detail: true },
-    });
+    let product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
     if (!product) return null;
 
     const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
     const COOLDOWN_MS = 30_000;
-
     const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
     const allowNow = Date.now() - last > COOLDOWN_MS;
 
-    // IMPORTANT: when refresh=true we FORCE the scrape (bypassing stale check)
-    if (refresh && allowNow) {
+    // If refresh=true, actually FORCE it (bypass stale check).
+    if (refresh && (!product.detail?.lastScrapedAt || allowNow)) {
       await this.scraper.refreshProduct(id, true).catch(() => undefined);
       product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
       return product;
     }
 
+    // Otherwise scrape only when stale + out of cooldown.
     if (stale && allowNow) {
       await this.scraper.refreshProduct(id).catch(() => undefined);
       product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
     }
-
     return product;
   }
 
-  // POST /products/:id/refresh — always force live scrape
+  // POST /products/:id/refresh — hard refresh endpoint
   async forceRefresh(id: string) {
-    await this.scraper.refreshProduct(id, true); // <-- force
+    await this.scraper.refreshProduct(id, true); // ← important
     return this.repo.findOne({ where: { id }, relations: { detail: true } });
   }
 
-  // -------------------------  TEMPORARY: seeding helper  -------------------------
+  // -------------------- temporary seed --------------------
   async ensureSeedProducts() {
     const existing = await this.repo.count();
     if (existing > 0) return { inserted: 0, skipped: existing };
