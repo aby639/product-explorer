@@ -16,7 +16,7 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  // simple “stale” check – 6 hours (used for non-forced list browsing)
+  // 6 hours
   private isStale(dt?: Date | null): boolean {
     if (!dt) return true;
     const SIX_HOURS = 6 * 60 * 60 * 1000;
@@ -40,32 +40,22 @@ export class ProductsService {
 
   // GET /products/:id?refresh=true
   async findOneAndMaybeRefresh(id: string, refresh = false) {
-    let product = await this.repo.findOne({
-      where: { id },
-      relations: { detail: true, category: true },
-    });
+    const load = async () =>
+      this.repo.findOne({ where: { id }, relations: { detail: true, category: true } });
+
+    let product = await load();
     if (!product) return null;
 
-    if (refresh) {
-      // Force a real scrape NOW (bypasses TTL/cooldowns)
-      await this.scraper.refreshProduct(id, { force: true }).catch(() => undefined);
+    const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
+    const COOLDOWN_MS = 30_000;
 
-      // re-load the very latest values (both product + detail)
-      product = await this.repo.findOne({
-        where: { id },
-        relations: { detail: true, category: true },
-      });
-      return product;
-    }
-
-    // Non-forced view: only scrape when obviously stale
     const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
-    if (stale) {
-      await this.scraper.refreshProduct(id, { force: false }).catch(() => undefined);
-      product = await this.repo.findOne({
-        where: { id },
-        relations: { detail: true, category: true },
-      });
+    const allowNow = Date.now() - last > COOLDOWN_MS;
+    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
+
+    if ((stale && allowNow) || forceAllowed) {
+      await this.scraper.refreshProduct(id).catch(() => undefined);
+      product = await load();            // <-- fetch the saved, fresh row
     }
     return product;
   }
