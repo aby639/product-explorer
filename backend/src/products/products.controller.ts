@@ -37,16 +37,23 @@ export class ProductsController {
     return product;
   }
 
+  // Optional convenience endpoint for a button that hits POST explicitly:
+  // POST /products/:id/refresh
+  @Post(':id/refresh')
+  async forceRefresh(@Param('id') id: string) {
+    const p = await this.svc.findOneAndMaybeRefresh(id, true);
+    if (!p) throw new NotFoundException('Product not found');
+    return p;
+  }
+
   // ---------------------------------------------------
   // TEMPORARY: POST /products/seed  (enable via env var)
   // ---------------------------------------------------
   @Post('seed')
   async seed(@Query('key') key?: string) {
-    // Hard off-switch: only works when SEED_ENABLED === '1'
     if (process.env.SEED_ENABLED !== '1') {
-      throw new NotFoundException(); // looks like the route doesn’t exist
+      throw new NotFoundException();
     }
-    // optional tiny guard
     if (process.env.SEED_KEY && key !== process.env.SEED_KEY) {
       throw new BadRequestException('Bad key');
     }
