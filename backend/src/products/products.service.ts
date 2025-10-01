@@ -16,7 +16,6 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  // 6 hours
   private isStale(dt?: Date | null): boolean {
     if (!dt) return true;
     const SIX_HOURS = 6 * 60 * 60 * 1000;
@@ -30,7 +29,8 @@ export class ProductsService {
       .leftJoin('p.category', 'c')
       .leftJoinAndSelect('p.detail', 'detail')
       .where('c.slug = :slug', { slug: categorySlug })
-      .orderBy('p.title', 'ASC')
+      // show most recently updated products first so changes are obvious
+      .orderBy('COALESCE(p.updatedAt, p.createdAt)', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
@@ -40,10 +40,10 @@ export class ProductsService {
 
   // GET /products/:id?refresh=true
   async findOneAndMaybeRefresh(id: string, refresh = false) {
-    const load = async () =>
-      this.repo.findOne({ where: { id }, relations: { detail: true, category: true } });
-
-    let product = await load();
+    let product = await this.repo.findOne({
+      where: { id },
+      relations: { detail: true },
+    });
     if (!product) return null;
 
     const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
@@ -51,11 +51,19 @@ export class ProductsService {
 
     const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
     const allowNow = Date.now() - last > COOLDOWN_MS;
-    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
 
-    if ((stale && allowNow) || forceAllowed) {
-      await this.scraper.refreshProduct(id).catch(() => undefined);
-      product = await load();            // <-- fetch the saved, fresh row
+    // If refresh=true, BYPASS the cooldown fully
+    if (refresh || (stale && allowNow)) {
+      try {
+        await this.scraper.refreshProduct(id);
+      } catch (err) {
+        // surface the error but still return the product
+        console.error('[ProductsService] refreshProduct failed:', err);
+      }
+      product = await this.repo.findOne({
+        where: { id },
+        relations: { detail: true },
+      });
     }
     return product;
   }
