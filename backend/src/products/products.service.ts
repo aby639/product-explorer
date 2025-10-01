@@ -24,18 +24,16 @@ export class ProductsService {
 
   // GET /products?category=<slug>&page=&limit=
   async findByCategorySlug(categorySlug: string, page = 1, limit = 20) {
-    // Guard: if the category doesn’t exist, return empty in a friendly way
     const cat = await this.cats.findOne({ where: { slug: categorySlug } });
-    if (!cat) {
-      return { items: [], total: 0, page, pageSize: limit };
-    }
+    if (!cat) return { items: [], total: 0, page, pageSize: limit };
 
     const qb = this.repo
       .createQueryBuilder('p')
       .leftJoin('p.category', 'c')
       .leftJoinAndSelect('p.detail', 'detail')
       .where('c.id = :cid', { cid: cat.id })
-      // IMPORTANT: don’t use COALESCE()/functions in TypeORM orderBy here
+      // keep ordering simple to avoid TypeORM alias/function quirks
+      // (if you want availability-first sort later, do it in JS)
       .orderBy('p.title', 'ASC')
       .skip((page - 1) * limit)
       .take(limit);
@@ -58,20 +56,24 @@ export class ProductsService {
     const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
     const allowNow = Date.now() - last > COOLDOWN_MS;
 
-    // If refresh=true, allow it (respecting small cooldown unless we’ve never scraped)
-    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
+    // IMPORTANT: when refresh=true we FORCE the scrape (bypassing stale check)
+    if (refresh && allowNow) {
+      await this.scraper.refreshProduct(id, true).catch(() => undefined);
+      product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
+      return product;
+    }
 
-    if ((stale && allowNow) || forceAllowed) {
+    if (stale && allowNow) {
       await this.scraper.refreshProduct(id).catch(() => undefined);
       product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
     }
+
     return product;
   }
 
-  // POST /products/:id/refresh — hard refresh endpoint (used by “Force refresh” button)
+  // POST /products/:id/refresh — always force live scrape
   async forceRefresh(id: string) {
-    // bypass the “stale” check; scraper itself still has a 15s in-memory gate
-    await this.scraper.refreshProduct(id);
+    await this.scraper.refreshProduct(id, true); // <-- force
     return this.repo.findOne({ where: { id }, relations: { detail: true } });
   }
 
