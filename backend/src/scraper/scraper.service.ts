@@ -1,4 +1,3 @@
-// src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -9,9 +8,8 @@ import { ProductDetail } from '../entities/product-detail.entity';
 
 type PWPage = import('playwright').Page;
 
-/* ------------------------------------------------------------------ */
-/* helpers                                                            */
-/* ------------------------------------------------------------------ */
+/* --------------------------------- helpers -------------------------------- */
+
 function absolutize(base: string, u?: string | null) {
   if (!u) return null;
   try { return new URL(u, base).toString(); } catch { return null; }
@@ -36,7 +34,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-// tiny-ish HTML entity decoder (good enough for snippets)
+// tiny HTML entity decoder (enough for our text snippets)
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -58,9 +56,7 @@ function decodeEntities(s: string): string {
     });
 }
 
-/* ------------------------------------------------------------------ */
-/* DOM extraction                                                      */
-/* ------------------------------------------------------------------ */
+/* ------------------------ DOM extraction (Playwright) ------------------------ */
 
 async function extractDescription(page: PWPage): Promise<string | null> {
   const raw =
@@ -175,28 +171,42 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Price extractor tuned for World of Books.
- * - Prefer currently **selected condition** price.
- * - Else pick **lowest in-stock**.
- * - Else JSON-LD / microdata / DOM patterns.
- * - If page says "Currently Unavailable"/"Out of stock", mark unavailable.
+ * World of Books price extractor:
+ *  - Detects "Currently Unavailable" with strong heuristics
+ *  - If unavailable, returns { price:null } and **skips** all other sources
+ *  - Else, prefers selected condition price; else lowest in-stock
+ *  - Falls back to LD-JSON / microdata / DOM / HTML as needed
  */
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
 
-  // Unavailable pill
+  // 0) Robust unavailability detection
   const unavailable = await page
     .evaluate(() => {
-      const scope = document.querySelector('main') || document.body;
-      const t = (scope?.textContent || '').toLowerCase();
-      return t.includes('currently unavailable') || t.includes('out of stock');
+      const root = (document.querySelector('main') || document.body)!;
+
+      // The big pill on WOB product pages
+      const pill = Array.from(root.querySelectorAll<HTMLElement>('button, [role="button"], div, span'))
+        .find(el => /currently unavailable/i.test(el.textContent || ''));
+
+      // Disable/ARIA markers
+      const ariaDisabled = !!root.querySelector('[aria-disabled="true"]:has-text("Unavailable"), [disabled]:has-text("Unavailable")');
+
+      // Textual fallback
+      const textSaysUnavailable = /currently unavailable|out of stock/i.test(root.textContent || '');
+
+      return !!(pill || ariaDisabled || textSaysUnavailable);
     })
     .catch(() => false);
-  if (unavailable) probes.push('flag:unavailable');
 
-  // 1) WOB condition buttons (selected or cheapest in-stock)
+  if (unavailable) {
+    probes.push('flag:unavailable');
+    return { price: null, currency: null, unavailable: true, probes };
+  }
+
+  // 1) WOB condition tiles/buttons
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -208,11 +218,9 @@ async function extractPriceAndCurrency(
 
       const buttons = Array.from(
         container.querySelectorAll<HTMLElement>(
-          'button:has-text("£"), [role="button"]:has-text("£"), .product-condition__option, [data-testid*="condition"]',
+          'button, [role="button"], .product-condition__option, [data-testid*="condition"]',
         ),
       );
-
-      if (!buttons.length) return null as null | { price: number; currency: string };
 
       const parseMoney = (s: string) => {
         const m = s.replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
@@ -226,7 +234,9 @@ async function extractPriceAndCurrency(
           const selected =
             btn.getAttribute('aria-pressed') === 'true' ||
             btn.getAttribute('aria-checked') === 'true' ||
-            btn.classList.contains('is-selected');
+            btn.classList.contains('is-selected') ||
+            btn.classList.contains('selected') ||
+            /selected/i.test(btn.getAttribute('class') || '');
           const disabled =
             btn.getAttribute('aria-disabled') === 'true' ||
             /out of stock|unavailable/i.test(text) ||
@@ -250,10 +260,10 @@ async function extractPriceAndCurrency(
 
   if (fromWobConditions && Number.isFinite(fromWobConditions.price)) {
     probes.push('price:wob-conditions');
-    return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable, probes };
+    return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
   }
 
-  // 2) JSON-LD
+  // 2) JSON-LD (skip any OutOfStock offers)
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null };
@@ -262,6 +272,8 @@ async function extractPriceAndCurrency(
         let best: number | null = null;
         let cur: string | null = null;
         const touchOffer = (o: any) => {
+          const avail = String(o?.availability || '').toLowerCase();
+          if (avail.includes('outofstock')) return; // skip unavailable LD offers
           const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
           const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
           const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
@@ -284,9 +296,10 @@ async function extractPriceAndCurrency(
       return out;
     })
     .catch(() => ({ price: null, currency: null }));
+
   if (fromLd.price != null) {
     probes.push('price:ld-json');
-    return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable, probes };
+    return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
   }
 
   // 3) Microdata / meta
@@ -314,15 +327,16 @@ async function extractPriceAndCurrency(
       return found;
     })
     .catch(() => [] as Array<{ v: number; c: string | null }>);
+
   if (fromMicro.length) {
     probes.push('price:micro/meta');
     const sane = fromMicro.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
     sane.sort((a, b) => a.v - b.v);
     const pick = sane[0];
-    if (pick) return { price: pick.v, currency: pick.c ?? 'GBP', unavailable, probes };
+    if (pick) return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
   }
 
-  // 4) Generic DOM / HTML fallbacks
+  // 4) Raw DOM scrape (generic)
   const fromDom = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -339,52 +353,62 @@ async function extractPriceAndCurrency(
     const m = joined.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
     if (m) {
       probes.push('price:dom-generic');
-      return { price: Number(m[2]), currency: 'GBP', unavailable, probes };
+      return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes };
     }
   }
 
+  // 5) Raw HTML fallback
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
     if (m) {
       probes.push('price:html-fallback');
-      return { price: Number(m[2]), currency: 'GBP', unavailable, probes };
+      return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes };
     }
   }
 
   probes.push('price:none');
-  return { price: null, currency: null, unavailable, probes };
+  return { price: null, currency: null, unavailable: false, probes };
 }
 
-/* ------------------------------------------------------------------ */
-/* Service                                                             */
-/* ------------------------------------------------------------------ */
+/* --------------------------------- service -------------------------------- */
+
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name);
 
-  // per-product mutex + attempt throttle
+  // in-memory per-product mutex + “last attempt” throttle (protects against SSR double hits)
   private inFlight = new Map<string, Promise<ProductDetail>>();
   private lastAttempt = new Map<string, number>();
-  private readonly ATTEMPT_COOLDOWN_MS = 15_000; // 15s
+  private readonly ATTEMPT_COOLDOWN_MS = 15_000; // 15s hard gate
 
   constructor(
     @InjectRepository(Product) private readonly products: Repository<Product>,
     @InjectRepository(ProductDetail) private readonly details: Repository<ProductDetail>,
   ) {}
 
-  async refreshProduct(productId: string): Promise<ProductDetail> {
+  /**
+   * If `force=true` we'll bypass the ATTEMPT_COOLDOWN_MS for this product,
+   * while still preserving the single in-flight job per product.
+   */
+  async refreshProduct(productId: string, force = false): Promise<ProductDetail> {
     const now = Date.now();
     const last = this.lastAttempt.get(productId) ?? 0;
 
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
-    if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
-      return this.inFlight.get(productId)!;
+
+    if (!force && (now - last < this.ATTEMPT_COOLDOWN_MS)) {
+      // Return existing detail if present to avoid hammering
+      const existing = await this.details.findOne({
+        where: { product: { id: productId } },
+        relations: { product: true },
+      });
+      if (existing) return existing;
     }
-    this.lastAttempt.set(productId, now);
 
     const work = this._refreshProduct(productId).finally(() => this.inFlight.delete(productId));
     this.inFlight.set(productId, work);
+    this.lastAttempt.set(productId, now);
     return work;
   }
 
@@ -402,7 +426,6 @@ export class ScraperService {
     let status: number | null = null;
     let unavailable = false;
     let priceProbes: string[] = [];
-    let scrapeError: any = null;
 
     const launchArgs = [
       '--no-sandbox',
@@ -434,7 +457,7 @@ export class ScraperService {
       const resp = await gotoWithRetry(page, product.sourceUrl);
       status = resp?.status?.() ?? null;
 
-      // Cookie banner (best-effort)
+      // Cookie banner (best effort)
       await page
         .locator(
           [
@@ -451,7 +474,7 @@ export class ScraperService {
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
 
-      // Extract fields
+      // ---- extract fields ----
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
@@ -461,28 +484,22 @@ export class ScraperService {
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
+      // Rating (best effort)
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
-
-      await context.close().catch(() => undefined);
-    } catch (err) {
-      scrapeError = err;
-      this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       await browser.close().catch(() => undefined);
     }
 
-    // Log what we found
+    // ---- persist & log ----
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
-        priceNum ?? 'na'
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'
       } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
-    // --- Persist Product changes ---
     let changedProduct = false;
 
     if (imageAbs && product.image !== imageAbs) {
@@ -490,14 +507,16 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    // CRITICAL: clear price if unavailable OR no price detected
+    // Clear price when unavailable OR no price detected
     if (unavailable || priceNum == null) {
       if (product.price !== null) {
+        this.log.log(`Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`);
         product.price = null;
         changedProduct = true;
       }
-    } else if (Number.isFinite(priceNum) && priceNum! > 0 && priceNum! < 2000) {
+    } else if (Number.isFinite(priceNum) && (priceNum as number) > 0 && (priceNum as number) < 2000) {
       if (product.price !== priceNum) {
+        this.log.log(`Updating price for ${product.id}: ${product.price ?? 'null'} -> ${priceNum}`);
         product.price = priceNum!;
         changedProduct = true;
       }
@@ -508,11 +527,8 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    if (changedProduct) {
-      await this.products.save(product);
-    }
+    if (changedProduct) await this.products.save(product);
 
-    // --- Upsert ProductDetail ---
     let detail = await this.details.findOne({
       where: { product: { id: product.id } },
       relations: { product: true },
@@ -521,16 +537,10 @@ export class ScraperService {
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable, priceProbes, error: scrapeError ? String(scrapeError) : null };
+    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable, priceProbes };
     detail.lastScrapedAt = new Date();
 
     await this.details.save(detail);
-
-    if (scrapeError) {
-      // Re-throw so caller can surface the error if desired (after we saved detail)
-      throw scrapeError;
-    }
-
     this.log.log(`Saved detail for ${product.id}`);
     return detail;
   }
