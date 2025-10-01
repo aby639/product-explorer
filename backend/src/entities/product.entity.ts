@@ -1,4 +1,3 @@
-// backend/src/entities/product.entity.ts
 import {
   Column,
   Entity,
@@ -23,7 +22,7 @@ export class Product {
   @Column({ type: 'text', nullable: true })
   image?: string | null;
 
-  // Store as DECIMAL in PG, expose as number in JS
+  // DECIMAL in DB, number in JS; must be nullable so we can clear on "Unavailable"
   @Column({
     type: 'numeric',
     precision: 10,
@@ -36,14 +35,12 @@ export class Product {
   })
   price?: number | null;
 
-  // ✅ use a concrete text type (varchar) — NOT Object
+  // keep simple varchar; nullable is fine
   @Column({ type: 'varchar', length: 8, nullable: true })
   currency?: string | null;
 
   @Column({ type: 'text', nullable: true })
   sourceUrl?: string | null;
-
-  // ----- relations -----
 
   @ManyToOne(() => Category, (c) => c.products, {
     nullable: false,
@@ -52,7 +49,6 @@ export class Product {
   @Index('idx_product_category')
   category!: Category;
 
-  // inverse side lives on ProductDetail with @JoinColumn there
   @OneToOne(() => ProductDetail, (d) => d.product, { cascade: true })
   detail?: ProductDetail | null;
 
