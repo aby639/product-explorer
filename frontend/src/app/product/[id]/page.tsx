@@ -1,4 +1,6 @@
 import Link from 'next/link'
+import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
 
 type Recommendation = {
   href: string
@@ -51,6 +53,18 @@ async function getProduct(id: string, refresh?: boolean): Promise<Product | null
   return JSON.parse(text)
 }
 
+/** Server action that forces a scrape on the backend, then reloads this page. */
+async function forceRefreshAction(id: string) {
+  'use server'
+  await fetch(`${API}/products/${encodeURIComponent(id)}/refresh`, {
+    method: 'POST',
+    cache: 'no-store',
+  }).catch(() => undefined)
+  // Ensure the page refetches fresh data
+  revalidatePath(`/product/${id}`)
+  redirect(`/product/${id}?refresh=true`)
+}
+
 // NOTE: Next.js 15: params/searchParams are Promises
 export default async function ProductPage({
   params,
@@ -78,7 +92,7 @@ export default async function ProductPage({
   }
 
   const recs = product.detail?.specs?.recommendations ?? []
-  const price = money(product.price, product.currency)
+  const formattedPrice = money(product.price, product.currency)
 
   return (
     <div className="space-y-6">
@@ -98,7 +112,7 @@ export default async function ProductPage({
 
         <div className="space-y-4">
           <h1 className="text-3xl font-semibold leading-tight">{product.title}</h1>
-          {price && <div className="text-lg">{price}</div>}
+          {formattedPrice && <div className="text-lg">{formattedPrice}</div>}
 
           <div className="flex gap-3">
             {product.sourceUrl ? (
@@ -108,9 +122,12 @@ export default async function ProductPage({
             ) : (
               <div className="opacity-70 text-sm">No source URL</div>
             )}
-            <Link href={`/product/${product.id}?refresh=true`} className="btn btn-primary">
-              Force refresh
-            </Link>
+
+            <form action={forceRefreshAction.bind(null, product.id)}>
+              <button type="submit" className="btn btn-primary">
+                Force refresh
+              </button>
+            </form>
           </div>
 
           <div className="card p-4 ring-1 ring-white/10">
