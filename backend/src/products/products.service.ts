@@ -16,7 +16,7 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  // simple “stale” check – 6 hours
+  // simple “stale” check – 6 hours (used for non-forced list browsing)
   private isStale(dt?: Date | null): boolean {
     if (!dt) return true;
     const SIX_HOURS = 6 * 60 * 60 * 1000;
@@ -42,25 +42,29 @@ export class ProductsService {
   async findOneAndMaybeRefresh(id: string, refresh = false) {
     let product = await this.repo.findOne({
       where: { id },
-      relations: { detail: true },
+      relations: { detail: true, category: true },
     });
     if (!product) return null;
 
-    // cooldown to avoid hammering the scraper during dev/SSR double fetches
-    const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
-    const COOLDOWN_MS = 30_000;
+    if (refresh) {
+      // Force a real scrape NOW (bypasses TTL/cooldowns)
+      await this.scraper.refreshProduct(id, { force: true }).catch(() => undefined);
 
-    const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
-    const allowNow = Date.now() - last > COOLDOWN_MS;
-
-    // IMPORTANT: even if refresh=true, respect a short cooldown (unless no detail exists)
-    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
-
-    if ((stale && allowNow) || forceAllowed) {
-      await this.scraper.refreshProduct(id).catch(() => undefined);
+      // re-load the very latest values (both product + detail)
       product = await this.repo.findOne({
         where: { id },
-        relations: { detail: true },
+        relations: { detail: true, category: true },
+      });
+      return product;
+    }
+
+    // Non-forced view: only scrape when obviously stale
+    const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
+    if (stale) {
+      await this.scraper.refreshProduct(id, { force: false }).catch(() => undefined);
+      product = await this.repo.findOne({
+        where: { id },
+        relations: { detail: true, category: true },
       });
     }
     return product;
@@ -68,7 +72,6 @@ export class ProductsService {
 
   // -------------------------  TEMPORARY: seeding helper  -------------------------
   async ensureSeedProducts() {
-    // if products already exist, do nothing
     const existing = await this.repo.count();
     if (existing > 0) return { inserted: 0, skipped: existing };
 
