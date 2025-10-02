@@ -84,9 +84,14 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
-          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
+          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p'
         ].join(','),
-        (nodes) => nodes.map((n) => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        (nodes) =>
+          nodes
+            .map((n) => (n.textContent || '').trim())
+            .filter(Boolean)
+            .join('\n')
+            .trim(),
       )
       .catch(() => '')) ||
     (await page
@@ -139,9 +144,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         // 1) OG/Twitter
         const og =
           document
-            .querySelector<HTMLMetaElement>(
-              'meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]',
-            )
+            .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
@@ -190,7 +193,10 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Extracts price & currency with World of Books quirks handled
+ * Extracts price & currency with World of Books quirks handled:
+ *  - If the page says "Currently Unavailable" => unavailable=true and **no price**
+ *  - Prefers WOB condition buttons; falls back to LD-JSON, microdata, DOM, HTML
+ *  - On WOB we only accept **GBP** prices; USD (or others) are ignored
  */
 async function extractPriceAndCurrency(
   page: PWPage,
@@ -199,7 +205,7 @@ async function extractPriceAndCurrency(
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
-  // 0) Unavailability detection
+  // 0) Unavailability detection (authoritative on WOB)
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -288,6 +294,7 @@ async function extractPriceAndCurrency(
           }
         }
 
+        // Compute best (lowest) price from acceptable offers
         let best: number | null = null;
         let cur: string | null = null;
 
@@ -315,6 +322,7 @@ async function extractPriceAndCurrency(
       probes.push('price:ld-json');
       return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
     } else {
+      // Found LD-JSON but not GBP on WOB — ignore.
       probes.push('price:ld-json-non-gbp-ignored');
     }
   }
@@ -426,13 +434,13 @@ export class ScraperService {
 
   private async _refreshProduct(productId: string): Promise<ProductDetail> {
     const product = await this.products.findOne({ where: { id: productId } });
-    if (!product || !product.sourceUrl) throw new Error('Product has no sourceUrl');
+    if (!product?.sourceUrl) throw new Error('Product has no sourceUrl');
 
-    // normalize & bind a non-null string for TS safety
-    const srcUrl: string = toHttps(product.sourceUrl) || product.sourceUrl;
-    product.sourceUrl = srcUrl; // persist https if we upgraded it
+    // ensure we persist https assets/links
+    product.sourceUrl = toHttps(product.sourceUrl);
+    await this.products.save(product).catch(() => undefined);
 
-    this.log.log(`[ScraperService] Scraping ${srcUrl}`);
+    this.log.log(`[ScraperService] Scraping ${product.sourceUrl}`);
 
     let description: string | null = null;
     let imageAbs: string | null = null;
@@ -463,7 +471,7 @@ export class ScraperService {
         extraHTTPHeaders: {
           'Accept-Language': 'en-GB,en;q=0.9',
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          Referer: new URL(srcUrl).origin + '/',
+          Referer: new URL(product.sourceUrl!).origin + '/',
         },
         locale: 'en-GB',
       });
@@ -471,7 +479,7 @@ export class ScraperService {
       const page = await context.newPage();
       await page.waitForTimeout(120 + Math.floor(Math.random() * 200));
 
-      const resp = await gotoWithRetry(page, srcUrl);
+      const resp = await gotoWithRetry(page, product.sourceUrl!);
       status = resp?.status?.() ?? null;
 
       // cookie banners (best effort)
@@ -493,7 +501,7 @@ export class ScraperService {
 
       // extract
       description = await extractDescription(page);
-      imageAbs = await extractImage(page, srcUrl);
+      imageAbs = await extractImage(page, product.sourceUrl!);
 
       const priceRes = await extractPriceAndCurrency(page);
       priceNum = priceRes.price;
@@ -509,15 +517,20 @@ export class ScraperService {
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
     } catch (err) {
       scrapeError = err;
-      this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.error(
+        `[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       await browser.close().catch(() => undefined);
     }
 
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} ` +
-        `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
-        `probes=${priceProbes.join(',')}`,
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
+        priceNum ?? 'na'
+      } ` +
+        `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${
+          ratingAverage ?? 'na'
+        } probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -532,7 +545,7 @@ export class ScraperService {
     }
 
     // Only accept GBP on WOB (and only when not unavailable)
-    const host = new URL(srcUrl).host;
+    const host = new URL(product.sourceUrl!).host;
     const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
     const acceptThisPrice =
       !unavailable &&
@@ -555,7 +568,9 @@ export class ScraperService {
     } else {
       // Clear price for unavailable or non-GBP (on WOB)
       if (product.price !== null) {
-        this.log.log(`Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`);
+        this.log.log(
+          `Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`,
+        );
         product.price = null;
         changedProduct = true;
       }
@@ -586,7 +601,7 @@ export class ScraperService {
     detail.lastScrapedAt = new Date();
 
     const saved = await this.details.save(detail);
-    (saved as any).product = undefined; // strip relation before returning
+    (saved as any).product = undefined; // strip relation for safety
 
     this.log.log(`Saved detail for ${product.id}`);
 
