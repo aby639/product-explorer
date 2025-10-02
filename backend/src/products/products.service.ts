@@ -16,7 +16,6 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  /** List grid with optional category slug + pagination */
   async list(params: { category?: string; page?: number; limit?: number }) {
     const page = Math.max(1, Number(params.page ?? 1));
     const take = Math.min(24, Math.max(1, Number(params.limit ?? 12)));
@@ -27,99 +26,38 @@ export class ProductsService {
       order: { title: 'ASC' },
       take,
       skip,
-      // no relations needed for grid
     });
 
-    // Return plain JSON objects (avoid class instances just in case)
-    const clean = items.map((p) => ({
-      id: p.id,
-      title: p.title,
-      image: p.image ?? null,
-      price: p.price ?? null,
-      currency: p.currency ?? null,
-    }));
-
-    return { items: clean, total, page, limit: take, pageSize: take };
+    return { items, total, page, pageSize: take };
   }
 
-  /** Get one product, with (optional) background refresh */
+  /** GET /products/:id?refresh=true */
   async getOne(id: string, refresh?: boolean) {
-    if (!id) throw new NotFoundException('Product not found');
-
-    const product = await this.products.findOne({
-      where: { id },
-      relations: { category: true }, // ok, not circular
-    });
+    const product = await this.products.findOne({ where: { id }, relations: { category: true } });
     if (!product) throw new NotFoundException('Product not found');
 
-    // Background refresh if requested (fire-and-forget)
     if (refresh) {
       this.scraper.refreshProduct(id).catch((err) => {
-        this.log.warn(`refreshProduct failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        this.log.warn(`refreshProduct failed for ${id}: ${String(err?.message ?? err)}`);
       });
     }
 
-    // IMPORTANT: do NOT load detail.product (prevents circular JSON)
-    const detail =
-      (await this.details.findOne({
-        where: { product: { id } },
-        // relations: { product: true }, // ⛔️ do not include
-      })) || null;
+    const detail = await this.details.findOne({ where: { product: { id } } });
 
-    const out = {
-      id: product.id,
-      title: product.title,
-      image: product.image ?? null,
-      price: product.price ?? null,
-      currency: product.currency ?? null,
-      sourceUrl: product.sourceUrl ?? null,
-      category: product.category ? { id: product.category.id, title: product.category.title, slug: product.category.slug } : null,
-      detail: detail
-        ? {
-            description: detail.description ?? null,
-            ratingAverage: detail.ratingAverage ?? null,
-            lastScrapedAt: detail.lastScrapedAt ?? null,
-            specs: detail.specs ?? null,
-          }
-        : null,
-    };
-
-    return out;
+    // Return a flat object the frontend expects
+    return { ...product, detail: detail ?? null };
   }
 
-  /** Force refresh (await the scrape), then return the newest data */
+  /** POST /products/:id/refresh */
   async forceRefresh(id: string) {
-    if (!id) throw new NotFoundException('Product not found');
-
     await this.scraper.refreshProduct(id).catch((err) => {
-      this.log.warn(`forceRefresh scrape failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(`forceRefresh scrape failed for ${id}: ${String(err?.message ?? err)}`);
     });
 
     const product = await this.products.findOne({ where: { id }, relations: { category: true } });
     if (!product) throw new NotFoundException('Product not found');
 
-    const detail =
-      (await this.details.findOne({
-        where: { product: { id } },
-        // relations: { product: true }, // ⛔️ prevent circular
-      })) || null;
-
-    return {
-      id: product.id,
-      title: product.title,
-      image: product.image ?? null,
-      price: product.price ?? null,
-      currency: product.currency ?? null,
-      sourceUrl: product.sourceUrl ?? null,
-      category: product.category ? { id: product.category.id, title: product.category.title, slug: product.category.slug } : null,
-      detail: detail
-        ? {
-            description: detail.description ?? null,
-            ratingAverage: detail.ratingAverage ?? null,
-            lastScrapedAt: detail.lastScrapedAt ?? null,
-            specs: detail.specs ?? null,
-          }
-        : null,
-    };
+    const detail = await this.details.findOne({ where: { product: { id } } });
+    return { ...product, detail: detail ?? null };
   }
 }
