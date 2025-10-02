@@ -16,7 +16,7 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  /** small helper: ensure browser-safe https URLs for images & external links */
+  /** make http assets safe under https sites */
   private toHttps(u?: string | null): string | null {
     if (!u) return u ?? null;
     try {
@@ -26,6 +26,25 @@ export class ProductsService {
     } catch {
       return u;
     }
+  }
+
+  /** strip circular refs & normalize URLs */
+  private sanitizeProduct(p: Product): Product {
+    return {
+      ...p,
+      image: this.toHttps(p.image) as any,
+      sourceUrl: this.toHttps(p.sourceUrl) as any,
+    };
+  }
+  private sanitizeDetail(d: ProductDetail | null): ProductDetail | null {
+    if (!d) return null;
+    // Ensure no circular reference sneaks in
+    // (if detail was previously saved with relation loaded)
+    const { product: _drop, ...rest } = d as any;
+    return {
+      ...(rest as ProductDetail),
+      // keep lastScrapedAt, description, ratingAverage, specs
+    };
   }
 
   async list(params: { category?: string; page?: number; limit?: number }) {
@@ -40,40 +59,37 @@ export class ProductsService {
       skip,
     });
 
-    // normalise URLs so images/links work under HTTPS
-    const itemsNorm = items.map((p) => ({
-      ...p,
-      image: this.toHttps(p.image),
-      sourceUrl: this.toHttps(p.sourceUrl),
-    }));
-
-    // NOTE: return 'limit' (not 'pageSize') to match the frontend
-    return { items: itemsNorm, total, page, limit: take };
+    return {
+      items: items.map((p) => this.sanitizeProduct(p)),
+      total,
+      page,
+      limit: take,
+    };
   }
 
   async getOne(id: string, refresh?: boolean) {
     const product = await this.products.findOne({
       where: { id },
-      relations: { category: true },
+      // relations: { category: true }, // not needed for this response
     });
     if (!product) throw new NotFoundException('Product not found');
 
-    // fire-and-forget background refresh if requested
     if (refresh) {
+      // background refresh; don’t await to keep response snappy
       this.scraper.refreshProduct(id).catch(() => undefined);
     }
 
-    const detail =
+    const detailRaw =
       (await this.details.findOne({
         where: { product: { id } },
-        relations: { product: true },
+        // IMPORTANT: don't load relations here
+        // relations: { product: true },
       })) || null;
 
-    // normalise URLs
-    product.image = this.toHttps(product.image) as any;
-    product.sourceUrl = this.toHttps(product.sourceUrl) as any;
-
-    return { product, detail };
+    return {
+      product: this.sanitizeProduct(product),
+      detail: this.sanitizeDetail(detailRaw),
+    };
   }
 
   async forceRefresh(id: string) {
@@ -82,16 +98,14 @@ export class ProductsService {
     const product = await this.products.findOne({ where: { id } });
     if (!product) throw new NotFoundException('Product not found');
 
-    const detail =
+    const detailRaw =
       (await this.details.findOne({
         where: { product: { id } },
-        relations: { product: true },
       })) || null;
 
-    // normalise URLs
-    product.image = this.toHttps(product.image) as any;
-    product.sourceUrl = this.toHttps(product.sourceUrl) as any;
-
-    return { product, detail };
+    return {
+      product: this.sanitizeProduct(product),
+      detail: this.sanitizeDetail(detailRaw),
+    };
   }
 }
