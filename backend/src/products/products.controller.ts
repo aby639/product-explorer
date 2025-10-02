@@ -1,19 +1,23 @@
-// src/products/products.controller.ts
-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ProductsService } from './products.service';
-import { ListProductsQueryDto } from './products.dto';
+import { ListProductsQueryDto } from './dto/get-products.dto';
 
 @Controller('products')
 export class ProductsController {
-  constructor(private readonly service: ProductsService) {}
+  constructor(private readonly svc: ProductsService) {}
 
   @Get()
-  list(@Query() q: ListProductsQueryDto) {
-    return this.service.list(q);
+  async list(@Query() q: ListProductsQueryDto) {
+    return this.svc.list(q);
   }
 
   @Get(':id')
-  getOne(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.service.getOne(id);
+  async detail(@Param('id') id: string) {
+    return this.svc.detail(id);
+  }
+
+  @Post(':id/refresh')
+  async refresh(@Param('id') id: string) {
+    return this.svc.refreshProduct(id);
   }
 }
