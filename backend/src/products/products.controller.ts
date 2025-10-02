@@ -7,17 +7,17 @@ export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
   @Get()
-  async list(@Query() q: ListProductsQueryDto) {
+  list(@Query() q: ListProductsQueryDto) {
     return this.products.list(q);
   }
 
   @Get(':id')
-  async detail(@Param('id') id: string) {
+  detail(@Param('id') id: string) {
     return this.products.detail(id);
   }
 
   @Post(':id/refresh')
-  async refresh(@Param('id') id: string) {
+  refresh(@Param('id') id: string) {
     return this.products.refresh(id);
   }
 }
