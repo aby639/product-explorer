@@ -12,7 +12,11 @@ type PWPage = import('playwright').Page;
 
 function absolutize(base: string, u?: string | null) {
   if (!u) return null;
-  try { return new URL(u, base).toString(); } catch { return null; }
+  try {
+    return new URL(u, base).toString();
+  } catch {
+    return null;
+  }
 }
 
 function toHttps(u?: string | null): string | null {
@@ -21,7 +25,9 @@ function toHttps(u?: string | null): string | null {
     const url = new URL(u);
     if (url.protocol === 'http:') url.protocol = 'https:';
     return url.toString();
-  } catch { return u; }
+  } catch {
+    return u;
+  }
 }
 
 async function gotoWithRetry(page: PWPage, url: string) {
@@ -31,7 +37,8 @@ async function gotoWithRetry(page: PWPage, url: string) {
       const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       if (resp?.status() === 429 && attempt < 2) {
         await page.waitForTimeout(500 * Math.pow(2, attempt));
-        attempt++; continue;
+        attempt++;
+        continue;
       }
       return resp;
     } catch {
@@ -79,20 +86,20 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
           'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
         ].join(','),
-        (nodes) => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        (nodes) => nodes.map((n) => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
       .catch(() => '')) ||
     (await page
       .evaluate(() => {
         const root = (document.querySelector('main') || document.body)!;
-        const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find(h =>
+        const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find((h) =>
           /summary|description/i.test(h.textContent || ''),
         );
         if (heading) {
           const section = heading.closest('section') || heading.parentElement;
           if (section) {
             const text = Array.from(section.querySelectorAll('p,div'))
-              .map(p => (p.textContent || '').trim())
+              .map((p) => (p.textContent || '').trim())
               .filter(Boolean)
               .join('\n')
               .trim();
@@ -117,7 +124,11 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
     (await page
       .evaluate(() => {
         const absolutize = (u: string) => {
-          try { return new URL(u, location.href).toString(); } catch { return null; }
+          try {
+            return new URL(u, location.href).toString();
+          } catch {
+            return null;
+          }
         };
         const isLogo = (u: string, alt = '') =>
           !u ||
@@ -128,7 +139,9 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         // 1) OG/Twitter
         const og =
           document
-            .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
+            .querySelector<HTMLMetaElement>(
+              'meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]',
+            )
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
@@ -153,9 +166,9 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
-          .map(img => {
+          .map((img) => {
             const srcset = img.getAttribute('srcset');
-            const srcFromSet = srcset?.split(',')?.map(s => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
+            const srcFromSet = srcset?.split(',')?.map((s) => s.trim().split(' ')[0])?.filter(Boolean)?.pop() || null;
             const src = img.getAttribute('src') || img.getAttribute('data-src') || srcFromSet || img.currentSrc || '';
             const alt = (img.getAttribute('alt') || '').toLowerCase();
             const r = img.getBoundingClientRect();
@@ -163,8 +176,8 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
             const ratio = r.height / Math.max(1, r.width);
             return { src, alt, area, ratio, w: r.width, h: r.height };
           })
-          .filter(c => c.src && !isLogo(c.src, c.alt))
-          .filter(c => c.w >= 180 && c.h >= 180);
+          .filter((c) => c.src && !isLogo(c.src, c.alt))
+          .filter((c) => c.w >= 180 && c.h >= 180);
 
         const score = (c: any) => c.area * (c.ratio >= 1.2 ? 2 : 1);
         candidates.sort((a, b) => score(b) - score(a));
@@ -292,7 +305,6 @@ async function extractPriceAndCurrency(
 
         out.price = best;
         out.currency = cur;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       } catch {}
       return out;
     })
@@ -312,8 +324,10 @@ async function extractPriceAndCurrency(
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = [];
 
-      document.querySelectorAll('[itemprop="price"]').forEach(el => {
-        const v = Number((el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''));
+      document.querySelectorAll('[itemprop="price"]').forEach((el) => {
+        const v = Number(
+          (el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''),
+        );
         const c = /£/.test(el.getAttribute('content') || '') ? 'GBP' : null;
         if (Number.isFinite(v)) found.push({ v, c });
       });
@@ -334,7 +348,7 @@ async function extractPriceAndCurrency(
     .catch(() => [] as Array<{ v: number; c: string | null }>);
 
   if (fromMicro.length) {
-    const sane = fromMicro.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
+    const sane = fromMicro.filter((x) => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
     sane.sort((a, b) => a.v - b.v);
     const pick = sane[0];
     if (pick && (!isWOB || pick.c === 'GBP')) {
@@ -349,7 +363,7 @@ async function extractPriceAndCurrency(
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
       const texts: string[] = [];
-      scope.querySelectorAll('.formatted-price, .price, [data-testid*="price"], [class*="price"]').forEach(el => {
+      scope.querySelectorAll('.formatted-price, .price, [data-testid*="price"], [class*="price"]').forEach((el) => {
         const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
         if (t) texts.push(t);
       });
@@ -412,12 +426,13 @@ export class ScraperService {
 
   private async _refreshProduct(productId: string): Promise<ProductDetail> {
     const product = await this.products.findOne({ where: { id: productId } });
-    if (!product?.sourceUrl) throw new Error('Product has no sourceUrl');
+    if (!product || !product.sourceUrl) throw new Error('Product has no sourceUrl');
 
-    // ensure we persist https assets/links
-    product.sourceUrl = toHttps(product.sourceUrl);
+    // normalize & bind a non-null string for TS safety
+    const srcUrl: string = toHttps(product.sourceUrl) || product.sourceUrl;
+    product.sourceUrl = srcUrl; // persist https if we upgraded it
 
-    this.log.log(`[ScraperService] Scraping ${product.sourceUrl}`);
+    this.log.log(`[ScraperService] Scraping ${srcUrl}`);
 
     let description: string | null = null;
     let imageAbs: string | null = null;
@@ -447,8 +462,8 @@ export class ScraperService {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         extraHTTPHeaders: {
           'Accept-Language': 'en-GB,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Referer': new URL(product.sourceUrl).origin + '/',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Referer: new URL(srcUrl).origin + '/',
         },
         locale: 'en-GB',
       });
@@ -456,25 +471,29 @@ export class ScraperService {
       const page = await context.newPage();
       await page.waitForTimeout(120 + Math.floor(Math.random() * 200));
 
-      const resp = await gotoWithRetry(page, product.sourceUrl);
+      const resp = await gotoWithRetry(page, srcUrl);
       status = resp?.status?.() ?? null;
 
       // cookie banners (best effort)
-      await page.locator(
-        [
-          'button:has-text("Accept all")',
-          'button:has-text("Accept All")',
-          'button:has-text("Accept cookies")',
-          '[aria-label="accept cookies"]',
-        ].join(','),
-      ).first().click({ timeout: 3_000 }).catch(() => undefined);
+      await page
+        .locator(
+          [
+            'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
+            'button:has-text("Accept cookies")',
+            '[aria-label="accept cookies"]',
+          ].join(','),
+        )
+        .first()
+        .click({ timeout: 3_000 })
+        .catch(() => undefined);
 
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
 
       // extract
       description = await extractDescription(page);
-      imageAbs = await extractImage(page, product.sourceUrl);
+      imageAbs = await extractImage(page, srcUrl);
 
       const priceRes = await extractPriceAndCurrency(page);
       priceNum = priceRes.price;
@@ -485,7 +504,8 @@ export class ScraperService {
       // rating (best effort)
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
-        (await page.locator('.rating__value').first().textContent().catch(() => null)) ?? null;
+        (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
+        null;
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
     } catch (err) {
       scrapeError = err;
@@ -496,8 +516,8 @@ export class ScraperService {
 
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} ` +
-      `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
-      `probes=${priceProbes.join(',')}`,
+        `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
+        `probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -512,7 +532,7 @@ export class ScraperService {
     }
 
     // Only accept GBP on WOB (and only when not unavailable)
-    const host = new URL(product.sourceUrl).host;
+    const host = new URL(srcUrl).host;
     const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
     const acceptThisPrice =
       !unavailable &&
@@ -550,7 +570,6 @@ export class ScraperService {
     // Get or create detail WITHOUT relations to avoid circular graphs
     let detail = await this.details.findOne({
       where: { product: { id: product.id } },
-      // relations: { product: true }, // ❌ don't load
     });
     if (!detail) {
       detail = this.details.create({ product }); // set FK by relation
@@ -567,8 +586,7 @@ export class ScraperService {
     detail.lastScrapedAt = new Date();
 
     const saved = await this.details.save(detail);
-    // strip relation before returning to callers (defense-in-depth)
-    (saved as any).product = undefined;
+    (saved as any).product = undefined; // strip relation before returning
 
     this.log.log(`Saved detail for ${product.id}`);
 
