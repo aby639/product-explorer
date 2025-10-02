@@ -1,128 +1,70 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
-import { Category } from '../entities/category.entity';
 import { ScraperService } from '../scraper/scraper.service';
 
 @Injectable()
 export class ProductsService {
+  private readonly log = new Logger(ProductsService.name);
+
   constructor(
-    @InjectRepository(Product) private readonly repo: Repository<Product>,
+    @InjectRepository(Product) private readonly products: Repository<Product>,
     @InjectRepository(ProductDetail) private readonly details: Repository<ProductDetail>,
-    @InjectRepository(Category) private readonly cats: Repository<Category>,
     private readonly scraper: ScraperService,
   ) {}
 
-  private isStale(dt?: Date | null): boolean {
-    if (!dt) return true;
-    const SIX_HOURS = 6 * 60 * 60 * 1000;
-    return Date.now() - dt.getTime() > SIX_HOURS;
-  }
+  async list(params: { category?: string; page?: number; limit?: number }) {
+    const page = Math.max(1, Number(params.page ?? 1));
+    const take = Math.min(24, Math.max(1, Number(params.limit ?? 12)));
+    const skip = (page - 1) * take;
 
-  // GET /products?category=<slug>&page=&limit=
-  async findByCategorySlug(categorySlug: string, page = 1, limit = 20) {
-    const cat = await this.cats.findOne({ where: { slug: categorySlug } });
-    if (!cat) {
-      return { items: [], total: 0, page, pageSize: limit };
-    }
-
-    const qb = this.repo
-      .createQueryBuilder('p')
-      .leftJoin('p.category', 'c')
-      .leftJoinAndSelect('p.detail', 'detail')
-      .where('c.id = :cid', { cid: cat.id })
-      .orderBy('p.title', 'ASC')
-      .skip((page - 1) * limit)
-      .take(limit);
-
-    const [items, total] = await qb.getManyAndCount();
-    return { items, total, page, pageSize: limit };
-  }
-
-  // GET /products/:id?refresh=true
-  async findOneAndMaybeRefresh(id: string, refresh = false) {
-    let product = await this.repo.findOne({
-      where: { id },
-      relations: { detail: true },
+    const [items, total] = await this.products.findAndCount({
+      where: params.category ? { category: { slug: params.category } as any } : {},
+      order: { title: 'ASC' },
+      take,
+      skip,
     });
-    if (!product) return null;
 
-    const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
-    const COOLDOWN_MS = 30_000;
-
-    const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
-    const allowNow = Date.now() - last > COOLDOWN_MS;
-
-    // allow forced refresh from the page (bypasses cooldown in ScraperService)
-    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
-
-    if ((stale && allowNow) || forceAllowed) {
-      await this.scraper.refreshProduct(id, !!refresh).catch(() => undefined);
-      product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
-    }
-
-    return product;
+    return { items, total, page, limit: take };
   }
 
-  // POST /products/:id/refresh — hard refresh used by the UI
+  async getOne(id: string, refresh?: boolean) {
+    const product = await this.products.findOne({
+      where: { id },
+      relations: { category: true },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+
+    // Try to refresh in the background if asked to.
+    if (refresh) {
+      // ❗️No second boolean anymore
+      this.scraper.refreshProduct(id).catch(() => undefined);
+    }
+
+    const detail =
+      (await this.details.findOne({
+        where: { product: { id } },
+        relations: { product: true },
+      })) || null;
+
+    return { product, detail };
+  }
+
   async forceRefresh(id: string) {
-    await this.scraper.refreshProduct(id, true).catch(() => undefined);
-    return this.repo.findOne({ where: { id }, relations: { detail: true } });
-  }
+    // ❗️No second boolean anymore
+    await this.scraper.refreshProduct(id).catch(() => undefined);
+    const product = await this.products.findOne({ where: { id } });
+    if (!product) throw new NotFoundException('Product not found');
 
-  // ------------------------- temporary seed -------------------------
-  async ensureSeedProducts() {
-    const existing = await this.repo.count();
-    if (existing > 0) return { inserted: 0, skipped: existing };
+    const detail =
+      (await this.details.findOne({
+        where: { product: { id } },
+        relations: { product: true },
+      })) || null;
 
-    const fiction = await this.cats.findOne({ where: { slug: 'fiction' } });
-    const nonfiction = await this.cats.findOne({ where: { slug: 'non-fiction' } });
-    if (!fiction || !nonfiction) {
-      throw new Error('Seed requires categories "fiction" and "non-fiction".');
-    }
-
-    const defs: Array<Partial<Product>> = [
-      {
-        title: 'The Silent Patient',
-        price: 6.99,
-        currency: 'GBP',
-        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/silent-patient-book-alex-michaelides-9781250301697',
-        category: fiction,
-      },
-      {
-        title: 'Us Three',
-        price: 4.99,
-        currency: 'GBP',
-        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/us-three-book-ruth-jones-9781784162238',
-        category: fiction,
-      },
-      {
-        title: 'Atomic Habits',
-        price: 7.99,
-        currency: 'GBP',
-        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/atomic-habits-an-easy-proven-way-to-build-good-habits-and-break-bad-ones-book-9780593189641',
-        category: nonfiction,
-      },
-      {
-        title: 'Sapiens',
-        price: 8.99,
-        currency: 'GBP',
-        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/sapiens-book-yuval-noah-harari-9781784873646',
-        category: nonfiction,
-      },
-      {
-        title: 'Educated',
-        price: 5.99,
-        currency: 'GBP',
-        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/educated-book-tara-westover-9781786330512',
-        category: nonfiction,
-      },
-    ];
-
-    await this.repo.save(defs.map(d => this.repo.create(d)));
-    return { inserted: defs.length, skipped: 0 };
+    return { product, detail };
   }
 }
