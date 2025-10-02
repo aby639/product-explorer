@@ -1,36 +1,42 @@
-// make sure you have something like this at the top:
-import { Injectable } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Product } from '../entities/product.entity';
+import { ListProductsQueryDto } from './dto/get-products.dto';
+import { ScraperService } from '../scraper/scraper.service';
 
 @Injectable()
 export class ProductsService {
   constructor(
     @InjectRepository(Product) private readonly repo: Repository<Product>,
+    private readonly scraper: ScraperService,
   ) {}
 
-  async list(params: { page?: number; limit?: number; category?: string }) {
-    // harden pagination
-    const page = Number(params.page) || 1;
-    const limit = Math.min(Math.max(Number(params.limit) || 12, 1), 50);
+  async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
-
-    const where = params.category ? { category: params.category } : {};
-
     const [items, total] = await this.repo.findAndCount({
-      where,
-      order: { updatedAt: 'DESC', id: 'ASC' },
-      take: limit,
+      where: category ? { category } : {},
+      order: { updatedAt: 'DESC' },
       skip,
+      take: limit,
     });
+    return { items, total, page, limit };
+  }
 
-    return {
-      items,
-      total,
-      page,
-      limit,
-      totalPages: Math.max(1, Math.ceil(total / limit)),
-    };
+  async detail(id: string) {
+    const product = await this.repo.findOne({ where: { id } });
+    if (!product) throw new NotFoundException('Product not found');
+    return product;
+  }
+
+  async refreshProduct(id: string) {
+    const prod = await this.repo.findOne({ where: { id } });
+    if (!prod) throw new NotFoundException('Product not found');
+
+    const scraped = await this.scraper.scrapeProduct(prod.sourceUrl);
+    // Merge + save
+    Object.assign(prod, scraped, { updatedAt: new Date() });
+    await this.repo.save(prod);
+    return prod;
   }
 }
