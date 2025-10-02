@@ -5,7 +5,7 @@ import { ProductsService } from './products.service';
 export class ProductsController {
   constructor(private readonly svc: ProductsService) {}
 
-  // LIST: /products?category=fiction&page=1&limit=12
+  /** Grid list: /products?category=fiction&page=1&limit=12 */
   @Get()
   list(
     @Query('category') category?: string,
@@ -14,18 +14,19 @@ export class ProductsController {
   ) {
     return this.svc.list({
       category: category || undefined,
-      page: page ? Number(page) : 1,
-      limit: limit ? Number(limit) : 12,
+      page: page != null ? Number(page) : undefined,
+      limit: limit != null ? Number(limit) : undefined,
     });
   }
 
-  // GET ONE: /products/:id?refresh=1
+  /** Details (optionally background refresh): /products/:id?refresh=true */
   @Get(':id')
   getOne(@Param('id') id: string, @Query('refresh') refresh?: string) {
-    return this.svc.getOne(id, refresh === '1' || refresh === 'true');
+    const doRefresh = refresh === '1' || refresh === 'true';
+    return this.svc.getOne(id, doRefresh);
   }
 
-  // FORCE REFRESH: POST /products/:id/refresh
+  /** Force refresh now */
   @Post(':id/refresh')
   refresh(@Param('id') id: string) {
     return this.svc.forceRefresh(id);
