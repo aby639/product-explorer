@@ -10,14 +10,13 @@ async function bootstrap() {
     origin: [
       'http://localhost:3000',
       'http://192.168.1.2:3000',
-      'https://product-explorer-frontend-1r8k.onrender.com',
+      'https://product-explorer-frontend-1r8k.onrender.com'
     ],
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,
+    allowedHeaders: ['Content-Type', 'Authorization']
   });
 
-  // transform=true turns "page=1" into number 1 so TypeORM skip/take works
+  // transform=true is critical (turns "page=1" -> number 1)
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const config = new DocumentBuilder()
