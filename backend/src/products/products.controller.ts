@@ -1,34 +1,31 @@
-import { Controller, Get, Param, Query, Post } from '@nestjs/common';
+import { Controller, Get, Param, ParseBoolPipe, Post, Query } from '@nestjs/common';
 import { ProductsService } from './products.service';
 
 @Controller('products')
 export class ProductsController {
   constructor(private readonly svc: ProductsService) {}
 
-  /** Grid list: /products?category=fiction&page=1&limit=12 */
   @Get()
   list(
     @Query('category') category?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
   ) {
-    return this.svc.list({
-      category: category || undefined,
-      page: page != null ? Number(page) : undefined,
-      limit: limit != null ? Number(limit) : undefined,
-    });
+    return this.svc.list({ category, page: Number(page), limit: Number(limit) });
   }
 
-  /** Details (optionally background refresh): /products/:id?refresh=true */
+  // GET /products/:id?refresh=true
   @Get(':id')
-  getOne(@Param('id') id: string, @Query('refresh') refresh?: string) {
-    const doRefresh = refresh === '1' || refresh === 'true';
-    return this.svc.getOne(id, doRefresh);
+  getOne(
+    @Param('id') id: string,
+    @Query('refresh', new ParseBoolPipe({ optional: true })) refresh?: boolean,
+  ) {
+    return this.svc.getOne(id, !!refresh);
   }
 
-  /** Force refresh now */
+  // POST /products/:id/refresh
   @Post(':id/refresh')
-  refresh(@Param('id') id: string) {
+  forceRefresh(@Param('id') id: string) {
     return this.svc.forceRefresh(id);
   }
 }
