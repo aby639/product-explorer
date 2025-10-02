@@ -16,9 +16,19 @@ export class ProductsService {
 
   async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
+
+    // Accept either a category id OR a slug; provide OR with array where
+    const where =
+      category
+        ? [
+            { category: { id: category } as any },
+            { category: { slug: category } as any }, // harmless if your Category has no slug
+          ]
+        : undefined;
+
     const [items, total] = await this.products.findAndCount({
-      where: category ? { category: { id: category } as any } : {},
-      order: { id: 'DESC' },
+      where,
+      order: { id: 'DESC' },          // don't sort by a column you don't have
       skip,
       take: limit,
       relations: { detail: true, category: true },
@@ -38,9 +48,10 @@ export class ProductsService {
   }
 
   async refresh(id: string) {
-    // delegate to your ScraperService (you already wrote this)
-    const detail = await this.scraper.refreshProduct(id);
-    // return the updated product with detail
+    // your ScraperService exposes refreshProduct(id)
+    await this.scraper.refreshProduct(id);
+
+    // return the updated product with relations
     const product = await this.products.findOne({
       where: { id },
       relations: { detail: true, category: true },
