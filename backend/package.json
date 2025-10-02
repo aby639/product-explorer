@@ -6,7 +6,7 @@
   "scripts": {
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "build": "nest build",
+    "build": "nest build -p tsconfig.build.json",
     "postinstall": "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium",
     "start:prod": "node dist/main.js"
   },
@@ -20,6 +20,7 @@
     "@nestjs/typeorm": "^10.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
+    "cross-env": "^7.0.3",
     "pg": "^8.11.3",
     "playwright": "^1.47.2",
     "reflect-metadata": "^0.2.1",
