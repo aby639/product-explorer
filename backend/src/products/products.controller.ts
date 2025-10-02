@@ -1,31 +1,19 @@
-import { Controller, Get, Param, ParseBoolPipe, Post, Query } from '@nestjs/common';
+// src/products/products.controller.ts
+import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
 import { ProductsService } from './products.service';
+import { ListProductsQueryDto } from './products.dto';
 
 @Controller('products')
 export class ProductsController {
-  constructor(private readonly svc: ProductsService) {}
+  constructor(private readonly service: ProductsService) {}
 
   @Get()
-  list(
-    @Query('category') category?: string,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
-  ) {
-    return this.svc.list({ category, page: Number(page), limit: Number(limit) });
+  list(@Query() q: ListProductsQueryDto) {
+    return this.service.list(q);
   }
 
-  // GET /products/:id?refresh=true
   @Get(':id')
-  getOne(
-    @Param('id') id: string,
-    @Query('refresh', new ParseBoolPipe({ optional: true })) refresh?: boolean,
-  ) {
-    return this.svc.getOne(id, !!refresh);
-  }
-
-  // POST /products/:id/refresh
-  @Post(':id/refresh')
-  forceRefresh(@Param('id') id: string) {
-    return this.svc.forceRefresh(id);
+  getOne(@Param('id', new ParseUUIDPipe()) id: string) {
+    return this.service.getOne(id);
   }
 }
