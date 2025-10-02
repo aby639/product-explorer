@@ -28,6 +28,17 @@ type Product = {
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
 export const dynamic = 'force-dynamic'
 
+const toHttps = (u?: string | null) => {
+  if (!u) return null
+  try {
+    const url = new URL(u, 'https://www.worldofbooks.com')
+    if (url.protocol === 'http:') url.protocol = 'https:'
+    return url.toString()
+  } catch {
+    return u
+  }
+}
+
 function money(v?: number | null, c?: string | null) {
   if (v == null || !c) return null
   try {
@@ -41,7 +52,7 @@ function money(v?: number | null, c?: string | null) {
 }
 
 async function getProduct(id: string, refresh?: boolean): Promise<Product | null> {
-  const qs = refresh ? '?refresh=1' : ''
+  const qs = refresh ? '?refresh=true' : ''
   const res = await fetch(`${API}/products/${encodeURIComponent(id)}${qs}`, {
     next: { revalidate: 0 },
     cache: 'no-store',
@@ -50,25 +61,25 @@ async function getProduct(id: string, refresh?: boolean): Promise<Product | null
   if (!res.ok) throw new Error(`Failed to load product (${res.status}).`)
   const text = await res.text()
   if (!text) return null
-  return JSON.parse(text)
+  const parsed = JSON.parse(text) as Product
+  // normalise http->https for images/links so the browser doesn't block them
+  parsed.image = toHttps(parsed.image)
+  parsed.sourceUrl = toHttps(parsed.sourceUrl)
+  return parsed
 }
 
-/** Safer server action: takes the product id from a hidden input, not from bind() */
-async function forceRefreshAction(formData: FormData) {
+/** Server action that forces a scrape on the backend, then reloads this page. */
+async function forceRefreshAction(id: string) {
   'use server'
-  const id = String(formData.get('id') ?? '')
-  if (!id) return
-
   await fetch(`${API}/products/${encodeURIComponent(id)}/refresh`, {
     method: 'POST',
     cache: 'no-store',
   }).catch(() => undefined)
-
   revalidatePath(`/product/${id}`)
   redirect(`/product/${id}?refresh=true`)
 }
 
-// Next.js 15: params/searchParams are Promises
+// Next.js 15 app router provides params/searchParams as Promises
 export default async function ProductPage({
   params,
   searchParams,
@@ -78,16 +89,22 @@ export default async function ProductPage({
 }) {
   const { id } = await params
   const sp = searchParams ? await searchParams : undefined
-  const refresh = sp?.refresh === 'true' || sp?.refresh === '1'
+  const refresh = sp?.refresh === 'true'
+
+  if (!id) {
+    return (
+      <div className="space-y-6">
+        <Link href="/categories/books" className="btn">← Back</Link>
+        <h1 className="text-3xl font-semibold">Product not found</h1>
+      </div>
+    )
+  }
 
   const product = await getProduct(id, refresh)
-
   if (!product) {
     return (
       <div className="space-y-6">
-        <Link href="/categories/books" className="btn">
-          ← Back
-        </Link>
+        <Link href="/categories/books" className="btn">← Back</Link>
         <h1 className="text-3xl font-semibold">Product not found</h1>
         <p className="opacity-80">It may have been removed or the database was reset.</p>
       </div>
@@ -99,16 +116,16 @@ export default async function ProductPage({
 
   return (
     <div className="space-y-6">
-      <Link href="/categories/books" className="btn">
-        ← Back
-      </Link>
+      <Link href="/categories/books" className="btn">← Back</Link>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
         <div className="card p-3">
           <div className="aspect-[16/9] w-full overflow-hidden rounded-2xl bg-slate-900/60 flex items-center justify-center">
-            {product.image && (
+            {product.image ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={product.image} alt={product.title} className="h-full w-full object-contain" />
+            ) : (
+              <div className="h-full w-full" />
             )}
           </div>
         </div>
@@ -126,11 +143,8 @@ export default async function ProductPage({
               <div className="opacity-70 text-sm">No source URL</div>
             )}
 
-            <form action={forceRefreshAction}>
-              <input type="hidden" name="id" value={product.id} />
-              <button type="submit" className="btn btn-primary">
-                Force refresh
-              </button>
+            <form action={forceRefreshAction.bind(null, product.id)}>
+              <button type="submit" className="btn btn-primary">Force refresh</button>
             </form>
           </div>
 
@@ -153,7 +167,7 @@ export default async function ProductPage({
               <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {recs.map((rec, i) => (
                   <li key={rec.sourceId ?? rec.href ?? i} className="card card-hover p-3">
-                    <a className="underline" href={rec.href} target="_blank" rel="noreferrer">
+                    <a className="underline" href={toHttps(rec.href) ?? '#'} target="_blank" rel="noreferrer">
                       {rec.title || rec.href}
                     </a>
                     {rec.price != null && rec.currency && (
