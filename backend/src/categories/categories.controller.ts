@@ -1,3 +1,4 @@
+// src/categories/categories.controller.ts
 import { Controller, Get, Param, Post } from '@nestjs/common';
 import { CategoriesService } from './categories.service';
 
@@ -5,13 +6,13 @@ import { CategoriesService } from './categories.service';
 export class CategoriesController {
   constructor(private readonly cats: CategoriesService) {}
 
-  // Accepts nav UUID or slug, e.g. /categories/books
+  // GET /categories/books  -> [{ id, title, slug }, ...]
   @Get(':navKey')
   list(@Param('navKey') navKey: string) {
     return this.cats.listByNavKey(navKey);
   }
 
-  // Optional: reseed quickly if the table was wiped
+  // POST /categories/refresh  -> reseed from scratch (optional)
   @Post('refresh')
   async refresh() {
     await this.cats.ensureSeed();
