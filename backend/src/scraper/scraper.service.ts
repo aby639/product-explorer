@@ -8,7 +8,7 @@ import { ProductDetail } from '../entities/product-detail.entity';
 
 type PWPage = import('playwright').Page;
 
-/* ----------------------------- helpers ----------------------------- */
+/* ------------------------------ helpers ------------------------------ */
 
 function absolutize(base: string, u?: string | null) {
   if (!u) return null;
@@ -22,8 +22,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
       const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       if (resp?.status() === 429 && attempt < 2) {
         await page.waitForTimeout(500 * Math.pow(2, attempt));
-        attempt++;
-        continue;
+        attempt++; continue;
       }
       return resp;
     } catch {
@@ -34,7 +33,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-// tiny entity decoder (enough for our snippets)
+// small entity decoder for description
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -56,7 +55,7 @@ function decodeEntities(s: string): string {
     });
 }
 
-/* --------------------------- DOM extraction --------------------------- */
+/* ------------------------- DOM extraction helpers ------------------------- */
 
 async function extractDescription(page: PWPage): Promise<string | null> {
   const raw =
@@ -69,9 +68,9 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
-          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
+          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p'
         ].join(','),
-        nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        (nodes) => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
       .catch(() => '')) ||
     (await page
@@ -124,7 +123,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
-        // 2) JSON-LD
+        // 2) JSON-LD Product/Book
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -141,7 +140,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           } catch {}
         }
 
-        // 3) Biggest portrait-ish IMG
+        // 3) Largest portrait-like IMG
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
@@ -169,22 +168,24 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Extract price/currency with robust “unavailable” detection for WOB.
+ * Extracts price & currency with World of Books quirks handled:
+ *  - If the page says "Currently Unavailable" => unavailable=true and **no price**
+ *  - Prefers WOB condition buttons; falls back to LD-JSON, microdata, DOM, HTML
+ *  - On WOB we only accept **GBP** prices; USD (or others) are ignored
  */
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
+  const host = new URL(page.url()).host;
+  const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
-  // Unavailable?
+  // 0) Unavailability detection (authoritative on WOB)
   const unavailable = await page
     .evaluate(() => {
-      const root = (document.querySelector('main') || document.body)!;
-      const pill = Array.from(root.querySelectorAll<HTMLElement>('button, [role="button"], div, span'))
-        .find(el => /currently unavailable/i.test(el.textContent || ''));
-      const ariaDisabled = !!root.querySelector('[aria-disabled="true"]:has-text("Unavailable"), [disabled]:has-text("Unavailable")');
-      const textSaysUnavailable = /currently unavailable|out of stock/i.test(root.textContent || '');
-      return !!(pill || ariaDisabled || textSaysUnavailable);
+      const scope = document.querySelector('main') || document.body;
+      const txt = (scope?.textContent || '').toLowerCase();
+      return /currently unavailable|out of stock/i.test(txt);
     })
     .catch(() => false);
 
@@ -193,7 +194,7 @@ async function extractPriceAndCurrency(
     return { price: null, currency: null, unavailable: true, probes };
   }
 
-  // 1) Condition tiles/buttons
+  // 1) WOB condition tiles
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -222,8 +223,7 @@ async function extractPriceAndCurrency(
             btn.getAttribute('aria-pressed') === 'true' ||
             btn.getAttribute('aria-checked') === 'true' ||
             btn.classList.contains('is-selected') ||
-            btn.classList.contains('selected') ||
-            /selected/i.test(btn.getAttribute('class') || '');
+            btn.classList.contains('selected');
           const disabled =
             btn.getAttribute('aria-disabled') === 'true' ||
             /out of stock|unavailable/i.test(text) ||
@@ -250,43 +250,56 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
   }
 
-  // 2) JSON-LD (skip OutOfStock)
+  // 2) LD-JSON (skip OutOfStock; on WOB require GBP)
   const fromLd = await page
     .evaluate(() => {
-      const out = { price: null as number | null, currency: null as string | null };
+      const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
       try {
         const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+        const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
+        const pushOffer = (o: any) => out.offers.push(o);
+
+        for (const s of scripts) {
+          const data = JSON.parse(s.textContent || 'null');
+          const list = asArray(data);
+          for (const item of list) {
+            const t = asArray(item?.['@type']);
+            if (!t.some((x: string) => /product|book/i.test(x))) continue;
+            asArray(item.offers).forEach(pushOffer);
+          }
+        }
+
+        // Compute best (lowest) price from acceptable offers
         let best: number | null = null;
         let cur: string | null = null;
-        const touchOffer = (o: any) => {
+
+        for (const o of out.offers) {
           const avail = String(o?.availability || '').toLowerCase();
-          if (avail.includes('outofstock')) return;
+          if (avail.includes('outofstock')) continue;
           const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
           const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
           const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
-          if (p != null && p > 0 && p < 2000 && (best == null || p < best)) { best = p; cur = c || cur; }
-        };
-        for (const s of scripts) {
-          const data = JSON.parse(s.textContent || 'null');
-          const list = Array.isArray(data) ? data : [data];
-          for (const item of list) {
-            const t = item?.['@type'];
-            const types = Array.isArray(t) ? t : t ? [t] : [];
-            if (!types.some((x: string) => /product|book/i.test(x))) continue;
-            const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
-            for (const o of offers) touchOffer(o);
+          if (p != null && p > 0 && p < 2000 && (best == null || p < best)) {
+            best = p;
+            cur = c || cur;
           }
         }
+
         out.price = best;
         out.currency = cur;
       } catch {}
       return out;
     })
-    .catch(() => ({ price: null, currency: null }));
+    .catch(() => ({ price: null, currency: null } as any));
 
   if (fromLd.price != null) {
-    probes.push('price:ld-json');
-    return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
+    if (!isWOB || fromLd.currency === 'GBP') {
+      probes.push('price:ld-json');
+      return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
+    } else {
+      // Found LD-JSON but not GBP on WOB — ignore.
+      probes.push('price:ld-json-non-gbp-ignored');
+    }
   }
 
   // 3) Microdata/meta
@@ -316,14 +329,17 @@ async function extractPriceAndCurrency(
     .catch(() => [] as Array<{ v: number; c: string | null }>);
 
   if (fromMicro.length) {
-    probes.push('price:micro/meta');
     const sane = fromMicro.filter(x => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
     sane.sort((a, b) => a.v - b.v);
     const pick = sane[0];
-    if (pick) return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
+    if (pick && (!isWOB || pick.c === 'GBP')) {
+      probes.push('price:micro/meta');
+      return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
+    }
+    probes.push('price:micro-non-gbp-ignored');
   }
 
-  // 4) DOM text fallbacks
+  // 4) Generic DOM
   const fromDom = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -335,7 +351,6 @@ async function extractPriceAndCurrency(
       return texts;
     })
     .catch(() => [] as string[]);
-
   if (fromDom.length) {
     const joined = fromDom.join(' • ');
     const m = joined.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
@@ -345,7 +360,7 @@ async function extractPriceAndCurrency(
     }
   }
 
-  // 5) Raw HTML fallback
+  // 5) HTML fallback
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
@@ -359,13 +374,13 @@ async function extractPriceAndCurrency(
   return { price: null, currency: null, unavailable: false, probes };
 }
 
-/* ----------------------------- service ----------------------------- */
+/* -------------------------------- service ------------------------------- */
 
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name);
 
-  // single in-flight job + cooldown
+  // in-memory throttle per product (avoid SSR double-hits)
   private inFlight = new Map<string, Promise<ProductDetail>>();
   private lastAttempt = new Map<string, number>();
   private readonly ATTEMPT_COOLDOWN_MS = 15_000;
@@ -375,23 +390,18 @@ export class ScraperService {
     @InjectRepository(ProductDetail) private readonly details: Repository<ProductDetail>,
   ) {}
 
-  /** set `force=true` to bypass cooldown */
-  async refreshProduct(productId: string, force = false): Promise<ProductDetail> {
+  async refreshProduct(productId: string): Promise<ProductDetail> {
     const now = Date.now();
     const last = this.lastAttempt.get(productId) ?? 0;
 
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
-    if (!force && now - last < this.ATTEMPT_COOLDOWN_MS) {
-      const existing = await this.details.findOne({
-        where: { product: { id: productId } },
-        relations: { product: true },
-      });
-      if (existing) return existing;
+    if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
+      return this.inFlight.get(productId)!;
     }
+    this.lastAttempt.set(productId, now);
 
     const work = this._refreshProduct(productId).finally(() => this.inFlight.delete(productId));
     this.inFlight.set(productId, work);
-    this.lastAttempt.set(productId, now);
     return work;
   }
 
@@ -409,9 +419,8 @@ export class ScraperService {
     let status: number | null = null;
     let unavailable = false;
     let priceProbes: string[] = [];
-    let scrapeError: string | null = null;
+    let scrapeError: any = null;
 
-    // Launch chromium that Render can run
     const launchArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -442,50 +451,46 @@ export class ScraperService {
       const resp = await gotoWithRetry(page, product.sourceUrl);
       status = resp?.status?.() ?? null;
 
-      // cookie banner (best-effort)
-      await page
-        .locator(
-          [
-            'button:has-text("Accept all")',
-            'button:has-text("Accept All")',
-            'button:has-text("Accept cookies")',
-            '[aria-label="accept cookies"]',
-          ].join(','),
-        )
-        .first()
-        .click({ timeout: 3_000 })
-        .catch(() => undefined);
+      // cookie banners (best effort)
+      await page.locator(
+        ['button:has-text("Accept all")',
+         'button:has-text("Accept All")',
+         'button:has-text("Accept cookies")',
+         '[aria-label="accept cookies"]'].join(',')
+      ).first().click({ timeout: 3_000 }).catch(() => undefined);
 
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
 
-      // extract fields
+      // extract
       description = await extractDescription(page);
       imageAbs = await extractImage(page, product.sourceUrl);
 
       const priceRes = await extractPriceAndCurrency(page);
       priceNum = priceRes.price;
-      currencyDetected = priceRes.currency ?? 'GBP';
+      currencyDetected = priceRes.currency ?? null;
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
+      // rating (best effort)
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
-        (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
-        null;
+        (await page.locator('.rating__value').first().textContent().catch(() => null)) ?? null;
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
     } catch (err) {
-      scrapeError = err instanceof Error ? err.message : String(err);
-      this.log.error(`[ScraperService] scrape failed: ${scrapeError}`);
+      scrapeError = err;
+      this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       await browser.close().catch(() => undefined);
     }
 
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} ` +
+      `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
+      `probes=${priceProbes.join(',')}`,
     );
 
-    // ----- persist Product -----
+    // ---------- persist ----------
     let changedProduct = false;
 
     if (imageAbs && product.image !== imageAbs) {
@@ -493,27 +498,42 @@ export class ScraperService {
       changedProduct = true;
     }
 
-    // unavailable OR no price → clear price
-    if (unavailable || priceNum == null) {
-      if (product.price !== null) {
-        product.price = null;
-        changedProduct = true;
-      }
-    } else if (Number.isFinite(priceNum) && priceNum! > 0 && priceNum! < 2000) {
+    // Only accept GBP on WOB (and only when not unavailable)
+    const host = new URL(product.sourceUrl).host;
+    const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
+    const acceptThisPrice =
+      !unavailable &&
+      priceNum != null &&
+      Number.isFinite(priceNum) &&
+      priceNum! > 0 &&
+      priceNum! < 2000 &&
+      (!isWOB || currencyDetected === 'GBP');
+
+    if (acceptThisPrice) {
       if (product.price !== priceNum) {
+        this.log.log(`Updating price for ${product.id}: ${product.price ?? 'null'} -> ${priceNum}`);
         product.price = priceNum!;
         changedProduct = true;
       }
-    }
-
-    if (currencyDetected && product.currency !== currencyDetected) {
-      product.currency = currencyDetected;
-      changedProduct = true;
+      if (currencyDetected && product.currency !== currencyDetected) {
+        product.currency = currencyDetected;
+        changedProduct = true;
+      }
+    } else {
+      // Clear price for unavailable or non-GBP (on WOB)
+      if (product.price !== null) {
+        this.log.log(`Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`);
+        product.price = null;
+        changedProduct = true;
+      }
+      if (isWOB && product.currency !== 'GBP') {
+        product.currency = 'GBP'; // default currency for WOB even when price is null
+        changedProduct = true;
+      }
     }
 
     if (changedProduct) await this.products.save(product);
 
-    // ----- persist Detail -----
     let detail = await this.details.findOne({
       where: { product: { id: product.id } },
       relations: { product: true },
@@ -527,14 +547,13 @@ export class ScraperService {
       lastStatus: status,
       unavailable,
       priceProbes,
-      error: scrapeError,
     };
     detail.lastScrapedAt = new Date();
 
     await this.details.save(detail);
-
-    // IMPORTANT: do NOT throw — we always return the latest persisted state
     this.log.log(`Saved detail for ${product.id}`);
+
+    if (scrapeError) throw scrapeError;
     return detail;
   }
 }
