@@ -1,19 +1,20 @@
-// backend/src/scraper/scraper.service.ts
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
-import { chromium, devices } from 'playwright'
+import { chromium, devices, Browser } from 'playwright'
 
 import { Product } from '../entities/product.entity'
 import { ProductDetail } from '../entities/product-detail.entity'
 
 type PWPage = import('playwright').Page
 
-/* ------------ helpers ------------ */
+/* --------------------------------- helpers -------------------------------- */
+
 function absolutize(base: string, u?: string | null) {
   if (!u) return null
   try { return new URL(u, base).toString() } catch { return null }
 }
+
 async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0
   while (attempt < 3) {
@@ -32,6 +33,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
   }
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null)
 }
+
 function decodeEntities(s: string): string {
   if (!s) return s
   const named = s
@@ -53,7 +55,8 @@ function decodeEntities(s: string): string {
     })
 }
 
-/* ------------ DOM extraction ------------ */
+/* ------------------------ DOM extraction (Playwright) --------------------- */
+
 async function extractDescription(page: PWPage): Promise<string | null> {
   const raw =
     (await page
@@ -65,16 +68,16 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
-          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
+          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p'
         ].join(','),
-        nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
+        nodes => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim()
       )
       .catch(() => '')) ||
     (await page
       .evaluate(() => {
         const root = (document.querySelector('main') || document.body)!
         const heading = Array.from(root.querySelectorAll('h1,h2,h3,h4')).find(h =>
-          /summary|description/i.test(h.textContent || ''),
+          /summary|description/i.test(h.textContent || '')
         )
         if (heading) {
           const section = heading.closest('section') || heading.parentElement
@@ -103,21 +106,21 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
   const raw =
     (await page
       .evaluate(() => {
-        const absolutize = (u: string) => {
-          try { return new URL(u, location.href).toString() } catch { return null }
-        }
+        const absolutize = (u: string) => { try { return new URL(u, location.href).toString() } catch { return null } }
         const isLogo = (u: string, alt = '') =>
           !u ||
           /\.svg(\?|$)/i.test(u) ||
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt)
 
+        // 1) OG/Twitter
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null
         if (og && !isLogo(og)) return absolutize(og)
 
+        // 2) JSON-LD Product/Book
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'))
         for (const s of ldList) {
           try {
@@ -134,6 +137,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
           } catch {}
         }
 
+        // 3) Largest portrait-ish IMG
         const root = document.querySelector('main') || document.body
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'))
         const candidates = imgs
@@ -165,6 +169,7 @@ async function extractPriceAndCurrency(
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = []
 
+  // Unavailable?
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body
@@ -177,6 +182,7 @@ async function extractPriceAndCurrency(
     return { price: null, currency: null, unavailable: true, probes }
   }
 
+  // World of Books condition tiles
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim()
@@ -188,7 +194,7 @@ async function extractPriceAndCurrency(
 
       const buttons = Array.from(
         container.querySelectorAll<HTMLElement>(
-          'button:has-text("£"), [role="button"]:has-text("£"), .product-condition__option, [data-testid*="condition"]',
+          'button:has-text("£"), [role="button"]:has-text("£"), .product-condition__option, [data-testid*="condition"]'
         ),
       )
       if (!buttons.length) return null as null | { price: number; currency: string }
@@ -232,6 +238,7 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable, probes }
   }
 
+  // JSON-LD
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null }
@@ -267,6 +274,7 @@ async function extractPriceAndCurrency(
     return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable, probes }
   }
 
+  // Microdata/meta
   const fromMicro = await page
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = []
@@ -296,6 +304,7 @@ async function extractPriceAndCurrency(
     if (pick) return { price: pick.v, currency: pick.c ?? 'GBP', unavailable, probes }
   }
 
+  // Generic DOM
   const fromDom = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body
@@ -316,6 +325,7 @@ async function extractPriceAndCurrency(
     }
   }
 
+  // HTML fallback
   const html = await page.content().catch(() => '')
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i)
@@ -329,11 +339,13 @@ async function extractPriceAndCurrency(
   return { price: null, currency: null, unavailable, probes }
 }
 
-/* ------------ service ------------ */
+/* --------------------------------- service -------------------------------- */
+
 @Injectable()
 export class ScraperService {
   private readonly log = new Logger(ScraperService.name)
 
+  // in-memory per-product mutex + throttle
   private inFlight = new Map<string, Promise<ProductDetail>>()
   private lastAttempt = new Map<string, number>()
   private readonly ATTEMPT_COOLDOWN_MS = 15_000
@@ -346,7 +358,6 @@ export class ScraperService {
   async refreshProduct(productId: string): Promise<ProductDetail> {
     const now = Date.now()
     const last = this.lastAttempt.get(productId) ?? 0
-
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!
     if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
       return this.inFlight.get(productId)!
@@ -379,11 +390,13 @@ export class ScraperService {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--single-process',
-      '--no-zygote',
+      '--no-zygote'
     ]
-    const browser = await chromium.launch({ headless: true, args: launchArgs })
 
+    let browser: Browser | null = null
     try {
+      browser = await chromium.launch({ headless: true, args: launchArgs })
+
       const { userAgent: _ua, ...desktopChrome } = devices['Desktop Chrome']
       const context = await browser.newContext({
         ...desktopChrome,
@@ -393,9 +406,9 @@ export class ScraperService {
         extraHTTPHeaders: {
           'Accept-Language': 'en-GB,en;q=0.9',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Referer': new URL(product.sourceUrl).origin + '/',
+          'Referer': new URL(product.sourceUrl).origin + '/'
         },
-        locale: 'en-GB',
+        locale: 'en-GB'
       })
 
       const page = await context.newPage()
@@ -404,14 +417,15 @@ export class ScraperService {
       const resp = await gotoWithRetry(page, product.sourceUrl)
       status = resp?.status?.() ?? null
 
+      // cookie banners (best-effort)
       await page
         .locator(
           [
             'button:has-text("Accept all")',
             'button:has-text("Accept All")',
             'button:has-text("Accept cookies")',
-            '[aria-label="accept cookies"]',
-          ].join(','),
+            '[aria-label="accept cookies"]'
+          ].join(',')
         )
         .first()
         .click({ timeout: 3_000 })
@@ -438,14 +452,29 @@ export class ScraperService {
       scrapeError = err
       this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
-      await browser.close().catch(() => undefined)
+      if (browser) await browser.close().catch(() => undefined)
     }
 
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
         priceNum ?? 'na'
-      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
+      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`
     )
+
+    // If scrape failed altogether, clear price to avoid showing stale seed values.
+    if (scrapeError) {
+      let detail = await this.details.findOne({ where: { product: { id: product.id } }, relations: { product: true } })
+      if (!detail) detail = this.details.create({ product })
+      detail.lastScrapedAt = new Date()
+      detail.specs = { ...(detail.specs || {}), lastStatus: status, error: String(scrapeError) }
+      await this.details.save(detail)
+
+      if (product.price != null) {
+        product.price = null
+        await this.products.save(product)
+      }
+      return detail
+    }
 
     let changedProduct = false
 
@@ -471,28 +500,20 @@ export class ScraperService {
       changedProduct = true
     }
 
-    if (changedProduct) {
-      await this.products.save(product)
-    }
+    if (changedProduct) await this.products.save(product)
 
     let detail = await this.details.findOne({
       where: { product: { id: product.id } },
-      relations: { product: true },
+      relations: { product: true }
     })
     if (!detail) detail = this.details.create({ product })
 
     detail.description = description ? decodeEntities(description) : null
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null
-    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable, priceProbes, error: scrapeError ? String(scrapeError) : null }
+    detail.specs = { ...(detail.specs || {}), lastStatus: status, unavailable, priceProbes }
     detail.lastScrapedAt = new Date()
 
     await this.details.save(detail)
-
-    if (scrapeError) {
-      // persist detail then surface the error to the caller logs
-      throw scrapeError
-    }
-
     this.log.log(`Saved detail for ${product.id}`)
     return detail
   }
