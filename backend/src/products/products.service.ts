@@ -16,6 +16,18 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
+  /** small helper: ensure browser-safe https URLs for images & external links */
+  private toHttps(u?: string | null): string | null {
+    if (!u) return u ?? null;
+    try {
+      const url = new URL(u);
+      if (url.protocol === 'http:') url.protocol = 'https:';
+      return url.toString();
+    } catch {
+      return u;
+    }
+  }
+
   async list(params: { category?: string; page?: number; limit?: number }) {
     const page = Math.max(1, Number(params.page ?? 1));
     const take = Math.min(24, Math.max(1, Number(params.limit ?? 12)));
@@ -28,7 +40,15 @@ export class ProductsService {
       skip,
     });
 
-    return { items, total, page, limit: take };
+    // normalise URLs so images/links work under HTTPS
+    const itemsNorm = items.map((p) => ({
+      ...p,
+      image: this.toHttps(p.image),
+      sourceUrl: this.toHttps(p.sourceUrl),
+    }));
+
+    // NOTE: return 'limit' (not 'pageSize') to match the frontend
+    return { items: itemsNorm, total, page, limit: take };
   }
 
   async getOne(id: string, refresh?: boolean) {
@@ -38,9 +58,8 @@ export class ProductsService {
     });
     if (!product) throw new NotFoundException('Product not found');
 
-    // Try to refresh in the background if asked to.
+    // fire-and-forget background refresh if requested
     if (refresh) {
-      // ❗️No second boolean anymore
       this.scraper.refreshProduct(id).catch(() => undefined);
     }
 
@@ -50,12 +69,16 @@ export class ProductsService {
         relations: { product: true },
       })) || null;
 
+    // normalise URLs
+    product.image = this.toHttps(product.image) as any;
+    product.sourceUrl = this.toHttps(product.sourceUrl) as any;
+
     return { product, detail };
   }
 
   async forceRefresh(id: string) {
-    // ❗️No second boolean anymore
     await this.scraper.refreshProduct(id).catch(() => undefined);
+
     const product = await this.products.findOne({ where: { id } });
     if (!product) throw new NotFoundException('Product not found');
 
@@ -64,6 +87,10 @@ export class ProductsService {
         where: { product: { id } },
         relations: { product: true },
       })) || null;
+
+    // normalise URLs
+    product.image = this.toHttps(product.image) as any;
+    product.sourceUrl = this.toHttps(product.sourceUrl) as any;
 
     return { product, detail };
   }
