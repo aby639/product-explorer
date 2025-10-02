@@ -1,17 +1,17 @@
-import Link from "next/link";
+import Link from 'next/link'
 
-const API = process.env.NEXT_PUBLIC_API_URL!;
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
 
-type Category = { id: string; title: string; slug: string };
+type Category = { id: string; title: string; slug: string }
 
 async function getData(navId: string) {
-  const res = await fetch(`${API}/categories/${navId}`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to load categories");
-  return (await res.json()) as Category[];
+  const res = await fetch(`${API}/categories/${encodeURIComponent(navId)}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error('Failed to load categories')
+  return (await res.json()) as Category[]
 }
 
 export default async function Page({ params }: { params: { navId: string } }) {
-  const cats = await getData(params.navId);
+  const cats = await getData(params.navId)
 
   return (
     <main className="container-xl py-8 space-y-6">
@@ -28,5 +28,5 @@ export default async function Page({ params }: { params: { navId: string } }) {
         ))}
       </ul>
     </main>
-  );
+  )
 }
