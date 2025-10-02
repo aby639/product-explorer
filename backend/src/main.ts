@@ -10,13 +10,12 @@ async function bootstrap() {
     origin: [
       'http://localhost:3000',
       'http://192.168.1.2:3000',
-      'https://product-explorer-frontend-1r8k.onrender.com'
+      'https://product-explorer-frontend-1r8k.onrender.com',
     ],
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
-  // transform=true is critical (turns "page=1" -> number 1)
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const config = new DocumentBuilder()
@@ -27,8 +26,9 @@ async function bootstrap() {
   SwaggerModule.setup('/docs', app, doc);
 
   const port = Number(process.env.PORT) || 8080;
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
   console.log(`API running on http://localhost:${port}`);
   console.log(`Swagger on http://localhost:${port}/docs`);
 }
+
 bootstrap();
