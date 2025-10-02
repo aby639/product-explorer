@@ -1,37 +1,38 @@
 {
-  "name": "frontend",
-  "version": "0.1.0",
+  "name": "product-explorer-backend",
+  "version": "1.0.0",
   "private": true,
+  "type": "commonjs",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start -p $PORT",
-    "lint": "eslint"
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "build": "nest build",
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium",
+    "start:prod": "node dist/main.js"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.90.2",
-    "@tanstack/react-query-devtools": "^5.90.2",
-    "next": "15.5.3",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "swr": "^2.3.6"
+    "@nestjs/common": "^10.0.0",
+    "@nestjs/config": "3.3.0",
+    "@nestjs/core": "^10.0.0",
+    "@nestjs/platform-express": "^10.0.0",
+    "@nestjs/swagger": "7.4.2",
+    "@nestjs/throttler": "5.2.0",
+    "@nestjs/typeorm": "^10.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.0",
+    "pg": "^8.11.3",
+    "playwright": "^1.47.2",
+    "reflect-metadata": "^0.2.1",
+    "rxjs": "^7.8.1",
+    "swagger-ui-express": "5.0.1",
+    "typeorm": "^0.3.20"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
-    "@tailwindcss/line-clamp": "^0.4.4",
-    "@tailwindcss/postcss": "^4.1.13",
-    "@tailwindcss/typography": "^0.5.19",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9",
-    "eslint-config-next": "15.5.3",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.13",
-    "typescript": "^5"
-  },
-  "engines": {
-    "node": ">=20"
+    "@nestjs/cli": "^10.0.0",
+    "@nestjs/schematics": "^10.0.0",
+    "@nestjs/testing": "^10.0.0",
+    "@types/node": "^20.11.30",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
   }
 }
