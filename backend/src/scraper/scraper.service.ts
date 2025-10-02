@@ -15,6 +15,15 @@ function absolutize(base: string, u?: string | null) {
   try { return new URL(u, base).toString(); } catch { return null; }
 }
 
+function toHttps(u?: string | null): string | null {
+  if (!u) return u ?? null;
+  try {
+    const url = new URL(u);
+    if (url.protocol === 'http:') url.protocol = 'https:';
+    return url.toString();
+  } catch { return u; }
+}
+
 async function gotoWithRetry(page: PWPage, url: string) {
   let attempt = 0;
   while (attempt < 3) {
@@ -68,7 +77,7 @@ async function extractDescription(page: PWPage): Promise<string | null> {
           '#description p, #description div',
           '.ProductDescription p, .product-description p',
           '[data-testid="product-description"] p, [data-testid="product-description"] div',
-          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p'
+          'section:has(h2:has-text("Description")) p, section:has(h3:has-text("Description")) p',
         ].join(','),
         (nodes) => nodes.map(n => (n.textContent || '').trim()).filter(Boolean).join('\n').trim(),
       )
@@ -168,10 +177,7 @@ async function extractImage(page: PWPage, baseUrl: string): Promise<string | nul
 }
 
 /**
- * Extracts price & currency with World of Books quirks handled:
- *  - If the page says "Currently Unavailable" => unavailable=true and **no price**
- *  - Prefers WOB condition buttons; falls back to LD-JSON, microdata, DOM, HTML
- *  - On WOB we only accept **GBP** prices; USD (or others) are ignored
+ * Extracts price & currency with World of Books quirks handled
  */
 async function extractPriceAndCurrency(
   page: PWPage,
@@ -180,7 +186,7 @@ async function extractPriceAndCurrency(
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
-  // 0) Unavailability detection (authoritative on WOB)
+  // 0) Unavailability detection
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -269,7 +275,6 @@ async function extractPriceAndCurrency(
           }
         }
 
-        // Compute best (lowest) price from acceptable offers
         let best: number | null = null;
         let cur: string | null = null;
 
@@ -287,6 +292,7 @@ async function extractPriceAndCurrency(
 
         out.price = best;
         out.currency = cur;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       } catch {}
       return out;
     })
@@ -297,7 +303,6 @@ async function extractPriceAndCurrency(
       probes.push('price:ld-json');
       return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
     } else {
-      // Found LD-JSON but not GBP on WOB — ignore.
       probes.push('price:ld-json-non-gbp-ignored');
     }
   }
@@ -409,6 +414,9 @@ export class ScraperService {
     const product = await this.products.findOne({ where: { id: productId } });
     if (!product?.sourceUrl) throw new Error('Product has no sourceUrl');
 
+    // ensure we persist https assets/links
+    product.sourceUrl = toHttps(product.sourceUrl);
+
     this.log.log(`[ScraperService] Scraping ${product.sourceUrl}`);
 
     let description: string | null = null;
@@ -453,10 +461,12 @@ export class ScraperService {
 
       // cookie banners (best effort)
       await page.locator(
-        ['button:has-text("Accept all")',
-         'button:has-text("Accept All")',
-         'button:has-text("Accept cookies")',
-         '[aria-label="accept cookies"]'].join(',')
+        [
+          'button:has-text("Accept all")',
+          'button:has-text("Accept All")',
+          'button:has-text("Accept cookies")',
+          '[aria-label="accept cookies"]',
+        ].join(','),
       ).first().click({ timeout: 3_000 }).catch(() => undefined);
 
       await page.waitForSelector('main, body', { timeout: 10_000 }).catch(() => undefined);
@@ -493,9 +503,12 @@ export class ScraperService {
     // ---------- persist ----------
     let changedProduct = false;
 
-    if (imageAbs && product.image !== imageAbs) {
-      product.image = imageAbs;
-      changedProduct = true;
+    if (imageAbs) {
+      const httpsImg = toHttps(imageAbs);
+      if (httpsImg && product.image !== httpsImg) {
+        product.image = httpsImg;
+        changedProduct = true;
+      }
     }
 
     // Only accept GBP on WOB (and only when not unavailable)
@@ -534,11 +547,14 @@ export class ScraperService {
 
     if (changedProduct) await this.products.save(product);
 
+    // Get or create detail WITHOUT relations to avoid circular graphs
     let detail = await this.details.findOne({
       where: { product: { id: product.id } },
-      relations: { product: true },
+      // relations: { product: true }, // ❌ don't load
     });
-    if (!detail) detail = this.details.create({ product });
+    if (!detail) {
+      detail = this.details.create({ product }); // set FK by relation
+    }
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
@@ -550,10 +566,13 @@ export class ScraperService {
     };
     detail.lastScrapedAt = new Date();
 
-    await this.details.save(detail);
+    const saved = await this.details.save(detail);
+    // strip relation before returning to callers (defense-in-depth)
+    (saved as any).product = undefined;
+
     this.log.log(`Saved detail for ${product.id}`);
 
     if (scrapeError) throw scrapeError;
-    return detail;
+    return saved;
   }
 }
