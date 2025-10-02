@@ -41,7 +41,7 @@ function money(v?: number | null, c?: string | null) {
 }
 
 async function getProduct(id: string, refresh?: boolean): Promise<Product | null> {
-  const qs = refresh ? '?refresh=true' : ''
+  const qs = refresh ? '?refresh=1' : ''
   const res = await fetch(`${API}/products/${encodeURIComponent(id)}${qs}`, {
     next: { revalidate: 0 },
     cache: 'no-store',
@@ -53,19 +53,22 @@ async function getProduct(id: string, refresh?: boolean): Promise<Product | null
   return JSON.parse(text)
 }
 
-/** Server action that forces a scrape on the backend, then reloads this page. */
-async function forceRefreshAction(id: string) {
+/** Safer server action: takes the product id from a hidden input, not from bind() */
+async function forceRefreshAction(formData: FormData) {
   'use server'
+  const id = String(formData.get('id') ?? '')
+  if (!id) return
+
   await fetch(`${API}/products/${encodeURIComponent(id)}/refresh`, {
     method: 'POST',
     cache: 'no-store',
   }).catch(() => undefined)
-  // Ensure the page refetches fresh data
+
   revalidatePath(`/product/${id}`)
   redirect(`/product/${id}?refresh=true`)
 }
 
-// NOTE: Next.js 15: params/searchParams are Promises
+// Next.js 15: params/searchParams are Promises
 export default async function ProductPage({
   params,
   searchParams,
@@ -75,7 +78,7 @@ export default async function ProductPage({
 }) {
   const { id } = await params
   const sp = searchParams ? await searchParams : undefined
-  const refresh = sp?.refresh === 'true'
+  const refresh = sp?.refresh === 'true' || sp?.refresh === '1'
 
   const product = await getProduct(id, refresh)
 
@@ -123,7 +126,8 @@ export default async function ProductPage({
               <div className="opacity-70 text-sm">No source URL</div>
             )}
 
-            <form action={forceRefreshAction.bind(null, product.id)}>
+            <form action={forceRefreshAction}>
+              <input type="hidden" name="id" value={product.id} />
               <button type="submit" className="btn btn-primary">
                 Force refresh
               </button>
