@@ -1,11 +1,21 @@
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+// src/products/products.dto.ts
+import { Type } from 'class-transformer';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
 
-export class GetProductsDto {
-  @IsString() category!: string;
-
-  @IsOptional() @IsInt() @Min(1)
+export class ListProductsQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
   page?: number = 1;
 
-  @IsOptional() @IsInt() @Min(1)
-  limit?: number = 20;
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  limit?: number = 12;
+
+  @IsOptional()
+  category?: string;
 }
