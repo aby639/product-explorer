@@ -1,12 +1,11 @@
-// backend/src/products/products.service.ts
-import { Injectable } from '@nestjs/common'
-import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 
-import { Product } from '../entities/product.entity'
-import { ProductDetail } from '../entities/product-detail.entity'
-import { Category } from '../entities/category.entity'
-import { ScraperService } from '../scraper/scraper.service'
+import { Product } from '../entities/product.entity';
+import { ProductDetail } from '../entities/product-detail.entity';
+import { Category } from '../entities/category.entity';
+import { ScraperService } from '../scraper/scraper.service';
 
 @Injectable()
 export class ProductsService {
@@ -18,15 +17,17 @@ export class ProductsService {
   ) {}
 
   private isStale(dt?: Date | null): boolean {
-    if (!dt) return true
-    const SIX_HOURS = 6 * 60 * 60 * 1000
-    return Date.now() - dt.getTime() > SIX_HOURS
+    if (!dt) return true;
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    return Date.now() - dt.getTime() > SIX_HOURS;
   }
 
   // GET /products?category=<slug>&page=&limit=
   async findByCategorySlug(categorySlug: string, page = 1, limit = 20) {
-    const cat = await this.cats.findOne({ where: { slug: categorySlug } })
-    if (!cat) return { items: [], total: 0, page, pageSize: limit }
+    const cat = await this.cats.findOne({ where: { slug: categorySlug } });
+    if (!cat) {
+      return { items: [], total: 0, page, pageSize: limit };
+    }
 
     const qb = this.repo
       .createQueryBuilder('p')
@@ -35,10 +36,10 @@ export class ProductsService {
       .where('c.id = :cid', { cid: cat.id })
       .orderBy('p.title', 'ASC')
       .skip((page - 1) * limit)
-      .take(limit)
+      .take(limit);
 
-    const [items, total] = await qb.getManyAndCount()
-    return { items, total, page, pageSize: limit }
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, page, pageSize: limit };
   }
 
   // GET /products/:id?refresh=true
@@ -46,38 +47,41 @@ export class ProductsService {
     let product = await this.repo.findOne({
       where: { id },
       relations: { detail: true },
-    })
-    if (!product) return null
+    });
+    if (!product) return null;
 
-    const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0
-    const COOLDOWN_MS = 30_000
+    const last = product.detail?.lastScrapedAt?.getTime?.() ?? 0;
+    const COOLDOWN_MS = 30_000;
 
-    const stale = this.isStale(product.detail?.lastScrapedAt ?? null)
-    const allowNow = Date.now() - last > COOLDOWN_MS
-    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow)
+    const stale = this.isStale(product.detail?.lastScrapedAt ?? null);
+    const allowNow = Date.now() - last > COOLDOWN_MS;
+
+    // allow forced refresh from the page (bypasses cooldown in ScraperService)
+    const forceAllowed = refresh && (!product.detail?.lastScrapedAt || allowNow);
 
     if ((stale && allowNow) || forceAllowed) {
-      await this.scraper.refreshProduct(id).catch(() => undefined)
-      product = await this.repo.findOne({ where: { id }, relations: { detail: true } })
+      await this.scraper.refreshProduct(id, !!refresh).catch(() => undefined);
+      product = await this.repo.findOne({ where: { id }, relations: { detail: true } });
     }
-    return product
+
+    return product;
   }
 
-  // POST /products/:id/refresh — used by “Force refresh”
+  // POST /products/:id/refresh — hard refresh used by the UI
   async forceRefresh(id: string) {
-    await this.scraper.refreshProduct(id)
-    return this.repo.findOne({ where: { id }, relations: { detail: true } })
+    await this.scraper.refreshProduct(id, true).catch(() => undefined);
+    return this.repo.findOne({ where: { id }, relations: { detail: true } });
   }
 
-  // -------------------------  TEMP: seeding helper  -------------------------
+  // ------------------------- temporary seed -------------------------
   async ensureSeedProducts() {
-    const existing = await this.repo.count()
-    if (existing > 0) return { inserted: 0, skipped: existing }
+    const existing = await this.repo.count();
+    if (existing > 0) return { inserted: 0, skipped: existing };
 
-    const fiction = await this.cats.findOne({ where: { slug: 'fiction' } })
-    const nonfiction = await this.cats.findOne({ where: { slug: 'non-fiction' } })
+    const fiction = await this.cats.findOne({ where: { slug: 'fiction' } });
+    const nonfiction = await this.cats.findOne({ where: { slug: 'non-fiction' } });
     if (!fiction || !nonfiction) {
-      throw new Error('Seed requires categories "fiction" and "non-fiction".')
+      throw new Error('Seed requires categories "fiction" and "non-fiction".');
     }
 
     const defs: Array<Partial<Product>> = [
@@ -85,45 +89,40 @@ export class ProductsService {
         title: 'The Silent Patient',
         price: 6.99,
         currency: 'GBP',
-        sourceUrl:
-          'https://www.worldofbooks.com/en-gb/products/silent-patient-book-alex-michaelides-9781250301697',
+        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/silent-patient-book-alex-michaelides-9781250301697',
         category: fiction,
       },
       {
         title: 'Us Three',
         price: 4.99,
         currency: 'GBP',
-        sourceUrl:
-          'https://www.worldofbooks.com/en-gb/products/us-three-book-ruth-jones-9781784162238',
+        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/us-three-book-ruth-jones-9781784162238',
         category: fiction,
       },
       {
         title: 'Atomic Habits',
         price: 7.99,
         currency: 'GBP',
-        sourceUrl:
-          'https://www.worldofbooks.com/en-gb/products/atomic-habits-an-easy-proven-way-to-build-good-habits-and-break-bad-ones-book-9780593189641',
+        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/atomic-habits-an-easy-proven-way-to-build-good-habits-and-break-bad-ones-book-9780593189641',
         category: nonfiction,
       },
       {
         title: 'Sapiens',
         price: 8.99,
         currency: 'GBP',
-        sourceUrl:
-          'https://www.worldofbooks.com/en-gb/products/sapiens-book-yuval-noah-harari-9781784873646',
+        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/sapiens-book-yuval-noah-harari-9781784873646',
         category: nonfiction,
       },
       {
         title: 'Educated',
         price: 5.99,
         currency: 'GBP',
-        sourceUrl:
-          'https://www.worldofbooks.com/en-gb/products/educated-book-tara-westover-9781786330512',
+        sourceUrl: 'https://www.worldofbooks.com/en-gb/products/educated-book-tara-westover-9781786330512',
         category: nonfiction,
       },
-    ]
+    ];
 
-    await this.repo.save(defs.map(d => this.repo.create(d)))
-    return { inserted: defs.length, skipped: 0 }
+    await this.repo.save(defs.map(d => this.repo.create(d)));
+    return { inserted: defs.length, skipped: 0 };
   }
 }
