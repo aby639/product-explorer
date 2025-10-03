@@ -1,4 +1,4 @@
-// Tailwind v4 uses the postcss plugin package
+/** Tailwind v4 PostCSS config */
 export default {
   plugins: {
     '@tailwindcss/postcss': {},
