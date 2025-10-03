@@ -1,4 +1,4 @@
-// next.config.js (ESM because package.json has "type": "module")
+// next.config.js
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: { ignoreDuringBuilds: true },
@@ -9,7 +9,6 @@ const nextConfig = {
       { protocol: 'https', hostname: 'www.worldofbooks.com' },
     ],
   },
-  // NOTE: remove outputFileTracingRoot (it’s not a valid Next option)
 };
 
 export default nextConfig;
