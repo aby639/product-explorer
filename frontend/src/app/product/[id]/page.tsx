@@ -4,20 +4,21 @@ const API = process.env.NEXT_PUBLIC_API_URL!;
 
 async function getProduct(id: string, refresh: boolean) {
   const url = `${API}/products/${id}${refresh ? '?refresh=true' : ''}`;
-  const res = await fetch(url, { cache: 'no-store' }); // <-- single directive
+  // Use a single cache directive to avoid the Next warning
+  const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error('Failed to load product');
   return res.json();
 }
 
 export default async function Page({
-  searchParams,
   params,
+  searchParams,
 }: {
-  params: Promise<{ id: string }>;
-  searchParams?: Promise<{ refresh?: string }>;
+  params: { id: string };
+  searchParams?: { refresh?: string };
 }) {
-  const [{ id }, sp] = await Promise.all([params, searchParams ?? Promise.resolve({})]);
-  const product = await getProduct(id, sp?.refresh === 'true');
+  const { id } = params;
+  const product = await getProduct(id, searchParams?.refresh === 'true');
 
   return (
     <main className="container-xl py-8 space-y-6">
@@ -35,7 +36,8 @@ export default async function Page({
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
-          {product.price && product.currency && (
+
+          {product.price != null && product.currency && (
             <div className="text-xl font-semibold">
               {new Intl.NumberFormat(
                 product.currency === 'GBP' ? 'en-GB' : 'en-US',
@@ -43,11 +45,13 @@ export default async function Page({
               ).format(product.price)}
             </div>
           )}
+
           {product.sourceUrl && (
             <a href={product.sourceUrl} target="_blank" rel="noreferrer" className="btn">
               View on World of Books
             </a>
           )}
+
           <a href={`/product/${id}?refresh=true`} className="btn btn-ghost">
             Force refresh
           </a>
