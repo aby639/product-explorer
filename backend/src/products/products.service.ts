@@ -1,4 +1,3 @@
-// backend/src/products/products.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -6,10 +5,6 @@ import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 import { ListProductsQueryDto } from './dto/get-products.dto';
 import { ScraperService } from '../scraper/scraper.service';
-
-function isUuid(v?: string): boolean {
-  return !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
 
 @Injectable()
 export class ProductsService {
@@ -22,15 +17,13 @@ export class ProductsService {
   async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
 
-    let where:
-      | undefined
-      | Array<{ category: { id?: string; slug?: string } }>;
-
-    if (category) {
-      where = isUuid(category)
-        ? [{ category: { id: category } as any }]
-        : [{ category: { slug: category } as any }];
-    }
+    // Accept id OR slug
+    const where = category
+      ? [
+          { category: { id: category } as any },
+          { category: { slug: category } as any },
+        ]
+      : undefined;
 
     const [items, total] = await this.products.findAndCount({
       where,
