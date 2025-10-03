@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+
 const fetcher = (url: string) =>
   fetch(url).then(r => {
     if (!r.ok) throw new Error(`Failed to load (${r.status})`);
@@ -22,6 +23,7 @@ const toHttps = (u?: string | null) => {
   }
 };
 
+type Category = { id: string; name: string; slug?: string | null };
 type Product = {
   id: string;
   title: string;
@@ -29,13 +31,7 @@ type Product = {
   price?: number | null;
   currency?: string | null;
 };
-
-type GridResponse = {
-  items: Product[];
-  total: number;
-  page: number;
-  limit: number;
-};
+type GridResponse = { items: Product[]; total: number; page: number; limit: number };
 
 function money(value?: number | null, currency?: string | null) {
   if (value == null || !currency) return '—';
@@ -64,17 +60,47 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
   const [page, setPage] = useState(1);
   const defaultLimit = 12;
 
+  // reset pagination when category changes
   useEffect(() => setPage(1), [categoryId]);
 
-  const url = useMemo(
-    () => `${API}/products?category=${encodeURIComponent(categoryId)}&page=${page}&limit=${defaultLimit}`,
-    [categoryId, page]
+  // 1) load all "books" categories to map slug -> UUID
+  const catsUrl = `${API}/categories/books`;
+  const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(
+    catsUrl,
+    fetcher,
+    { revalidateOnFocus: false }
   );
 
-  const { data, error, isLoading } = useSWR<GridResponse>(url, fetcher, {
+  // Try match by slug first; fall back to case-insensitive name match.
+  const matched = useMemo(() => {
+    if (!cats) return undefined;
+    const bySlug = cats.find(c => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
+    if (bySlug) return bySlug;
+    return cats.find(c => c.name.toLowerCase() === categoryId.toLowerCase());
+  }, [cats, categoryId]);
+
+  // 2) once we have the UUID, fetch products
+  const productsUrl = useMemo(() => {
+    if (!matched?.id) return null;
+    const params = new URLSearchParams({
+      category: matched.id,
+      page: String(page),
+      limit: String(defaultLimit),
+    });
+    return `${API}/products?${params.toString()}`;
+  }, [matched?.id, page]);
+
+  const {
+    data,
+    error: prodErr,
+    isLoading: prodLoading,
+  } = useSWR<GridResponse>(productsUrl, fetcher, {
     revalidateOnFocus: false,
     keepPreviousData: true,
   });
+
+  const isLoading = catsLoading || prodLoading;
+  const error = catsErr || prodErr;
 
   const items = (data?.items ?? []).map(p => ({ ...p, image: toHttps(p.image) }));
   const total = typeof data?.total === 'number' ? data!.total : 0;
@@ -87,6 +113,14 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   return (
     <div className="space-y-5">
+      {/* category not found */}
+      {!isLoading && !matched && (
+        <div className="card p-4 text-sm">
+          <div className="font-medium">Unknown category: “{categoryId}”.</div>
+          <div className="opacity-70">Go back and choose a listed category.</div>
+        </div>
+      )}
+
       {error && (
         <div className="card p-4 text-sm">
           <div className="font-medium">Oops, failed to load products.</div>
@@ -94,15 +128,8 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
         </div>
       )}
 
-      {!isLoading && !error && items.length === 0 && (
-        <div className="card p-6 text-sm">
-          <div className="font-medium">No products found.</div>
-          <div className="opacity-70">This category is empty right now.</div>
-        </div>
-      )}
-
       <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {isLoading
+        {isLoading || !matched
           ? Array.from({ length: 6 }).map((_, i) => <CardSkeleton key={i} />)
           : items.map(p => (
               <li key={p.id} className="group card card-hover card-raise p-4 hover:border-white/20">
@@ -130,14 +157,29 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
             ))}
       </ul>
 
+      {!isLoading && matched && items.length === 0 && !error && (
+        <div className="card p-6 text-sm">
+          <div className="font-medium">No products found.</div>
+          <div className="opacity-70">This category is empty right now.</div>
+        </div>
+      )}
+
       <div className="flex items-center gap-3 pt-1">
-        <button className="btn disabled:opacity-50" disabled={page <= 1 || isLoading} onClick={() => setPage(p => Math.max(1, p - 1))}>
+        <button
+          className="btn disabled:opacity-50"
+          disabled={page <= 1 || isLoading}
+          onClick={() => setPage(p => Math.max(1, p - 1))}
+        >
           Prev
         </button>
         <span className="rounded-full border border-white/15 px-4 py-2 text-sm">
           {Math.min(page, pages)} / {pages}
         </span>
-        <button className="btn disabled:opacity-50" disabled={page >= pages || isLoading} onClick={() => setPage(p => Math.min(pages, p + 1))}>
+        <button
+          className="btn disabled:opacity-50"
+          disabled={page >= pages || isLoading}
+          onClick={() => setPage(p => Math.min(pages, p + 1))}
+        >
           Next
         </button>
         <div className="ml-auto text-xs opacity-70">Total: {total}</div>
