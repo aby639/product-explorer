@@ -6,6 +6,11 @@ import { ProductDetail } from '../entities/product-detail.entity';
 import { ListProductsQueryDto } from './dto/get-products.dto';
 import { ScraperService } from '../scraper/scraper.service';
 
+function looksLikeUuid(value?: string) {
+  // Simple UUID v4-ish check; good enough for routing
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -17,25 +22,26 @@ export class ProductsService {
   async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
 
-    // Accept id OR slug for category to avoid UUID cast errors (like "fiction").
-    const where = category
-      ? [
-          { category: { id: category } as any },
-          { category: { slug: category } as any },
-        ]
-      : undefined;
+    // Build explicit QB so we can safely filter by slug OR id
+    const qb = this.products
+      .createQueryBuilder('p')
+      .leftJoinAndSelect('p.detail', 'detail')
+      .leftJoinAndSelect('p.category', 'category')
+      .orderBy('p.id', 'DESC') // stable ordering
+      .skip(skip)
+      .take(limit);
 
-    const [items, total] = await this.products.findAndCount({
-      where,
-      order: { id: 'DESC' },
-      skip,
-      take: limit,
-      relations: { detail: true, category: true },
-      loadRelationIds: false,
-    });
-
-    return { items, total, page, limit };
+    if (category) {
+      if (looksLikeUuid(category)) {
+        qb.andWhere('p.categoryId = :catId', { catId: category });
+      } else {
+        qb.andWhere('category.slug = :slug', { slug: category });
+      }
     }
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, page, limit };
+  }
 
   async detail(id: string) {
     const product = await this.products.findOne({
@@ -48,6 +54,7 @@ export class ProductsService {
 
   async refresh(id: string) {
     await this.scraper.refreshProduct(id);
+
     const product = await this.products.findOne({
       where: { id },
       relations: { detail: true, category: true },
