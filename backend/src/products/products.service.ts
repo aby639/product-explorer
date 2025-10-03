@@ -8,7 +8,6 @@ import { ListProductsQueryDto } from './dto/get-products.dto';
 import { ScraperService } from '../scraper/scraper.service';
 
 function isUuid(v?: string): boolean {
-  // strict UUID v4/any version check
   return !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
@@ -25,18 +24,12 @@ export class ProductsService {
 
     let where:
       | undefined
-      | Array<{
-          category: { id?: string; slug?: string };
-        }>;
+      | Array<{ category: { id?: string; slug?: string } }>;
 
     if (category) {
-      if (isUuid(category)) {
-        // query only by UUID
-        where = [{ category: { id: category } as any }];
-      } else {
-        // query only by slug
-        where = [{ category: { slug: category } as any }];
-      }
+      where = isUuid(category)
+        ? [{ category: { id: category } as any }]
+        : [{ category: { slug: category } as any }];
     }
 
     const [items, total] = await this.products.findAndCount({
