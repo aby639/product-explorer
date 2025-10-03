@@ -17,7 +17,7 @@ export class ProductsService {
   async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
 
-    // Accept id OR slug
+    // Accept id OR slug for category to avoid UUID cast errors (like "fiction").
     const where = category
       ? [
           { category: { id: category } as any },
@@ -35,7 +35,7 @@ export class ProductsService {
     });
 
     return { items, total, page, limit };
-  }
+    }
 
   async detail(id: string) {
     const product = await this.products.findOne({
