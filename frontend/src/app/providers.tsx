@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import dynamic from 'next/dynamic';
 
@@ -9,8 +9,8 @@ const Devtools = dynamic(
   { ssr: false }
 );
 
-export default function Providers({ children }: { children: React.ReactNode }) {
-  // Create the QueryClient exactly once on first render
+export default function Providers({ children }: { children: ReactNode }) {
+  // Create the QueryClient once
   const [client] = useState(
     () =>
       new QueryClient({
