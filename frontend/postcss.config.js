@@ -1,7 +1,6 @@
-/** @type {import('postcss-load-config').Config} */
+// Tailwind v4 uses the postcss plugin package
 export default {
   plugins: {
     '@tailwindcss/postcss': {},
-    autoprefixer: {}
-  }
+  },
 };
