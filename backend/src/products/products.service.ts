@@ -1,3 +1,4 @@
+// backend/src/products/products.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -5,6 +6,11 @@ import { Product } from '../entities/product.entity';
 import { ProductDetail } from '../entities/product-detail.entity';
 import { ListProductsQueryDto } from './dto/get-products.dto';
 import { ScraperService } from '../scraper/scraper.service';
+
+function isUuid(v?: string): boolean {
+  // strict UUID v4/any version check
+  return !!v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
 
 @Injectable()
 export class ProductsService {
@@ -17,18 +23,25 @@ export class ProductsService {
   async list({ page = 1, limit = 12, category }: ListProductsQueryDto) {
     const skip = (page - 1) * limit;
 
-    // Accept either a category id OR a slug; provide OR with array where
-    const where =
-      category
-        ? [
-            { category: { id: category } as any },
-            { category: { slug: category } as any }, // harmless if your Category has no slug
-          ]
-        : undefined;
+    let where:
+      | undefined
+      | Array<{
+          category: { id?: string; slug?: string };
+        }>;
+
+    if (category) {
+      if (isUuid(category)) {
+        // query only by UUID
+        where = [{ category: { id: category } as any }];
+      } else {
+        // query only by slug
+        where = [{ category: { slug: category } as any }];
+      }
+    }
 
     const [items, total] = await this.products.findAndCount({
       where,
-      order: { id: 'DESC' },          // don't sort by a column you don't have
+      order: { id: 'DESC' },
       skip,
       take: limit,
       relations: { detail: true, category: true },
@@ -48,10 +61,7 @@ export class ProductsService {
   }
 
   async refresh(id: string) {
-    // your ScraperService exposes refreshProduct(id)
     await this.scraper.refreshProduct(id);
-
-    // return the updated product with relations
     const product = await this.products.findOne({
       where: { id },
       relations: { detail: true, category: true },
