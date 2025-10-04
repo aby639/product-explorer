@@ -184,15 +184,14 @@ async function extractImage(page: PWPage): Promise<string | null> {
 }
 
 /**
- * Extracts price & currency with World of Books quirks handled:
- *  - If the page says "Currently Unavailable" => unavailable=true and no price
- *  - Prefers WOB condition buttons; falls back to LD-JSON, microdata, DOM
- *  - On WOB we only accept GBP prices
+ * Extract price & currency with World of Books quirks handled.
  */
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
+
+  // ✅ define once and reuse
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
@@ -307,12 +306,12 @@ async function extractPriceAndCurrency(
     })
     .catch(() => ({ price: null, currency: null } as any));
 
-  const host = new URL(page.url()).host;
-  const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
-
   if (fromLd.price != null) {
     if (!isWOB || fromLd.currency === 'GBP') {
-      return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes: ['price:ld-json'] };
+      probes.push('price:ld-json');
+      return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
+    } else {
+      probes.push('price:ld-json-non-gbp-ignored');
     }
   }
 
@@ -349,18 +348,24 @@ async function extractPriceAndCurrency(
     sane.sort((a, b) => a.v - b.v);
     const pick = sane[0];
     if (pick && (!isWOB || pick.c === 'GBP')) {
-      return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes: ['price:micro/meta'] };
+      probes.push('price:micro/meta');
+      return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
     }
+    probes.push('price:micro-non-gbp-ignored');
   }
 
-  // Last resort: look for £xx.xx in DOM/HTML
+  // Last resort: look for £xx.xx in HTML
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
-    if (m) return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes: ['price:html-fallback'] };
+    if (m) {
+      probes.push('price:html-fallback');
+      return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes };
+    }
   }
 
-  return { price: null, currency: null, unavailable: false, probes: ['price:none'] };
+  probes.push('price:none');
+  return { price: null, currency: null, unavailable: false, probes };
 }
 
 /* -------------------------------- service ------------------------------- */
@@ -500,15 +505,14 @@ export class ScraperService {
     }
 
     // Only accept GBP on WOB (and only when not unavailable)
-    const host = new URL(product.sourceUrl!).host;
-    const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
+    const wob = /(^|\.)worldofbooks\.com$/i.test(new URL(product.sourceUrl!).host);
     const acceptThisPrice =
       !unavailable &&
       priceNum != null &&
       Number.isFinite(priceNum) &&
       priceNum! > 0 &&
       priceNum! < 2000 &&
-      (!isWOB || currencyDetected === 'GBP');
+      (!wob || currencyDetected === 'GBP');
 
     if (acceptThisPrice) {
       if (product.price !== priceNum) {
@@ -529,7 +533,7 @@ export class ScraperService {
         product.price = null;
         changedProduct = true;
       }
-      if (isWOB && product.currency !== 'GBP') {
+      if (wob && product.currency !== 'GBP') {
         product.currency = 'GBP';
         changedProduct = true;
       }
