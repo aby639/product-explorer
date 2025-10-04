@@ -1,12 +1,13 @@
+// backend/src/products/products.service.ts
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Like, Repository } from 'typeorm';
+import { ILike, Repository } from 'typeorm';
 
 import { Product } from '../entities/product.entity';
 import { Category } from '../entities/category.entity';
 
 export type ListOptions = {
-  category?: string;    // uuid | slug | name | comma-separated
+  category?: string; // uuid | slug | title | comma-separated
   page?: number;
   limit?: number;
 };
@@ -29,7 +30,7 @@ export class ProductsService {
     const page = Math.max(1, Number(opts.page ?? 1));
     const limit = Math.max(1, Math.min(48, Number(opts.limit ?? 12)));
 
-    // ----- resolve category filter -> category IDs -----
+    // ---- resolve category -> array of category IDs ----
     let categoryIds: string[] | undefined;
 
     if (opts.category) {
@@ -40,44 +41,41 @@ export class ProductsService {
 
       const resolvedIds: string[] = [];
 
-      // UUIDs are already IDs
-      for (const t of tokens) {
-        if (isUuid(t)) resolvedIds.push(t);
-      }
+      // keep all UUIDs as-is
+      for (const t of tokens) if (isUuid(t)) resolvedIds.push(t);
 
-      // Non-UUIDs: try slug first, then name (case-insensitive)
+      // the rest are slugs or titles
       const nonUuids = tokens.filter((t) => !isUuid(t));
       if (nonUuids.length) {
-        // Slug match
+        // slug matches
         const slugMatches = await this.categories.find({
           where: nonUuids.map((s) => ({ slug: s })),
           select: ['id'],
         });
 
         const matchedIds = new Set(slugMatches.map((c) => c.id));
-        const remaining = nonUuids.filter((t) => ![...matchedIds].includes(t));
+        const remaining = nonUuids.filter((t) => !matchedIds.has(t));
 
-        let nameMatches: Category[] = [];
+        // title matches (case-insensitive)
+        let titleMatches: Category[] = [];
         if (remaining.length) {
-          // Loose name match; “fiction” / “non-fiction”
-          nameMatches = await this.categories.find({
-            where: remaining.map((t) => ({ name: Like(t) })),
+          titleMatches = await this.categories.find({
+            // IMPORTANT: use 'title' (your entity field), not 'name'
+            where: remaining.map((t) => ({ title: ILike(t) })),
             select: ['id'],
           });
         }
 
         resolvedIds.push(
           ...slugMatches.map((c) => c.id),
-          ...nameMatches.map((c) => c.id),
+          ...titleMatches.map((c) => c.id),
         );
       }
 
-      if (resolvedIds.length) {
-        categoryIds = Array.from(new Set(resolvedIds));
-      }
+      if (resolvedIds.length) categoryIds = Array.from(new Set(resolvedIds));
     }
 
-    // ----- query -----
+    // ---- query products ----
     const qb = this.products
       .createQueryBuilder('p')
       .leftJoinAndSelect('p.category', 'c')
@@ -90,7 +88,6 @@ export class ProductsService {
     }
 
     const [items, total] = await qb.getManyAndCount();
-
     return { items, total, page, limit };
   }
 
