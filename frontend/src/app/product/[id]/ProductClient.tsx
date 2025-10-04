@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import useSWR from 'swr';
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -14,104 +15,91 @@ type Product = {
   currency?: string | null;
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
-    id: string;
     description?: string | null;
-    ratingAverage?: number | null;
     lastScrapedAt?: string | null;
+    ratingAverage?: number | null;
     specs?: Record<string, any> | null;
   } | null;
 };
 
-type RelatedResp = { items: Array<{ id: string; title: string; image?: string | null; price?: number | null; currency?: string | null }> };
-
 const fetcher = (url: string) =>
   fetch(url, { cache: 'no-store' }).then((r) => {
-    if (!r.ok) throw new Error(`Failed (${r.status})`);
+    if (!r.ok) throw new Error(`Failed to load (${r.status})`);
     return r.json();
   });
 
-function fmtMoney(v?: number | null, ccy?: string | null) {
-  if (v == null || !ccy) return null;
+const toMoney = (value?: number | null, currency?: string | null) => {
+  if (value == null || !currency) return null;
   try {
     return new Intl.NumberFormat(
-      ccy === 'GBP' ? 'en-GB' : ccy === 'EUR' ? 'de-DE' : 'en-US',
-      { style: 'currency', currency: ccy },
-    ).format(v);
+      currency === 'GBP' ? 'en-GB' : currency === 'EUR' ? 'de-DE' : 'en-US',
+      { style: 'currency', currency }
+    ).format(value);
   } catch {
-    return `${Number(v).toFixed(2)} ${ccy}`;
+    return `${Number(value)} ${currency}`;
   }
-}
+};
 
-function toHttps(u?: string | null) {
-  if (!u) return null;
-  try {
-    const url = new URL(u);
-    if (url.protocol === 'http:') url.protocol = 'https:';
-    return url.toString();
-  } catch {
-    return u;
-  }
-}
-
-function getSessionId(): string {
-  if (typeof window === 'undefined') return 'server';
-  const KEY = 'pe:session';
-  let v = localStorage.getItem(KEY);
-  if (!v) {
-    v = crypto.randomUUID();
-    localStorage.setItem(KEY, v);
-  }
-  return v;
+function Stars({ value }: { value: number }) {
+  const filled = Math.round(Math.max(0, Math.min(5, value)));
+  return (
+    <div aria-label={`Rating ${value} out of 5`} className="flex gap-1 text-yellow-300">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <span key={i} aria-hidden>{i < filled ? '★' : '☆'}</span>
+      ))}
+      <span className="ml-2 text-xs opacity-75">{value.toFixed(1)}</span>
+    </div>
+  );
 }
 
 export default function ProductClient({ product }: { product: Product }) {
-  const price = fmtMoney(product.price, product.currency);
-  const wobUrl = useMemo(() => {
-    // prefer detail.specs.sourceUrl if you stored it; else trust product.detail?.specs?.sourceUrl
-    const raw =
-      (product as any)?.sourceUrl ||
-      product?.detail?.specs?.sourceUrl ||
-      null;
-    return toHttps(raw);
-  }, [product]);
+  const router = useRouter();
+  const sp = useSearchParams();
+  const refreshing = sp.get('refresh') === 'true';
 
-  // --- view history ping (optional bonus) ---
+  // Post view event (persisted view history)
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const body = {
-        sessionId: getSessionId(),
-        pathJson: [window.location.pathname],
-      };
-      fetch(`${API}/views`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      }).catch(() => void 0);
-    } catch {}
+    const sessionId =
+      (typeof window !== 'undefined' && localStorage.getItem('pe_session')) ||
+      (Math.random().toString(36).slice(2) + Date.now().toString(36));
+    if (typeof window !== 'undefined') localStorage.setItem('pe_session', sessionId);
+
+    fetch(`${API}/views`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, path: window.location.pathname }),
+    }).catch(() => undefined);
   }, []);
 
-  // --- related in same category ---
-  const relatedUrl = product.category?.id
-    ? `${API}/products?category=${product.category.id}&page=1&limit=6`
-    : null;
-  const { data: related } = useSWR<RelatedResp>(relatedUrl, fetcher, {
+  // Related in same category (simple recommendation strip)
+  const relatedUrl = useMemo(() => {
+    const cid = product.category?.id;
+    if (!cid) return null;
+    const p = new URLSearchParams({ category: cid, limit: '12', page: '1' });
+    return `${API}/products?${p.toString()}`;
+  }, [product.category?.id]);
+
+  const { data: related } = useSWR<{ items: Product[] }>(relatedUrl, fetcher, {
     revalidateOnFocus: false,
   });
-  const relatedItems = (related?.items || [])
-    .filter((p) => p.id !== product.id)
-    .slice(0, 4);
 
-  // --- back behaviour: restore last list or fallback to /products ---
-  const backHref =
-    (typeof window !== 'undefined' && localStorage.getItem('lastListPath')) ||
-    '/products';
+  const money = toMoney(product.price, product.currency);
+  const wobUrl =
+    product.detail?.specs?.sourceUrl ??
+    product.detail?.specs?.source_url ??
+    product['sourceUrl' as any] ??
+    product['source_url' as any] ??
+    undefined;
+
+  const onBack = useCallback(() => {
+    const last = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
+    if (last) router.push(last);
+    else router.back();
+  }, [router]);
 
   return (
     <>
-      <Link href={backHref} className="btn mb-4">
-        ← Back
-      </Link>
+      <button onClick={onBack} className="btn">← Back</button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
@@ -119,40 +107,42 @@ export default function ProductClient({ product }: { product: Product }) {
           <img
             src={product.image ?? ''}
             alt={product.title}
-            className="max-h-[520px] object-contain"
+            className="max-h-[420px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
 
-          {price ? (
-            <div className="text-xl font-semibold">{price}</div>
+          {money ? (
+            <div className="text-xl font-semibold">{money}</div>
           ) : (
             <div className="opacity-70">Price not available</div>
           )}
 
-          <div className="flex flex-wrap gap-3">
+          {product.detail?.ratingAverage != null && (
+            <Stars value={product.detail.ratingAverage} />
+          )}
+
+          <div className="flex gap-3">
             {wobUrl && (
               <a
                 href={wobUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="btn"
+                className="btn btn-ghost"
               >
                 View on World of Books
               </a>
             )}
-            <Link href={`/product/${product.id}?refresh=true`} className="btn btn-ghost">
-              Force refresh
+            <Link
+              href={`/product/${product.id}?refresh=true`}
+              className={`btn ${refreshing ? 'opacity-60 cursor-wait' : ''}`}
+              prefetch={false}
+            >
+              {refreshing ? 'Refreshing…' : 'Force refresh'}
             </Link>
           </div>
-
-          {product?.detail?.ratingAverage ? (
-            <div className="text-sm opacity-90">
-              ⭐ {product.detail.ratingAverage.toFixed(1)} / 5
-            </div>
-          ) : null}
 
           {product?.detail?.description && (
             <div className="card p-4">
@@ -170,44 +160,47 @@ export default function ProductClient({ product }: { product: Product }) {
         </div>
       </section>
 
-      {relatedItems.length > 0 && product.category?.title && (
-        <section className="mt-10 space-y-4">
-          <h2 className="text-lg font-semibold">
-            Related in {product.category.title}
+      {related?.items?.length ? (
+        <section className="mt-10">
+          <h2 className="text-lg font-semibold mb-4">
+            Related in {product.category?.title ?? 'this category'}
           </h2>
-          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            {relatedItems.map((r) => (
-              <li key={r.id} className="card card-hover p-4">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={toHttps(r.image) ?? ''}
-                  alt={r.title}
-                  className="h-44 w-full rounded-xl bg-slate-900/60 object-contain"
-                />
-                <div className="mt-3 line-clamp-2 font-medium">{r.title}</div>
-                <div className="opacity-70 text-sm">
-                  {fmtMoney(r.price, r.currency) ?? '—'}
-                </div>
-                <Link
-                  href={`/product/${r.id}`}
-                  onClick={() => {
-                    // keep current list ref so Back works from child → parent
-                    if (typeof window !== 'undefined') {
-                      localStorage.setItem(
-                        'lastListPath',
-                        window.location.pathname,
-                      );
-                    }
-                  }}
-                  className="btn btn-ghost mt-3"
-                >
-                  View
-                </Link>
-              </li>
-            ))}
+          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {related.items
+              .filter((r) => r.id !== product.id)
+              .slice(0, 6)
+              .map((r) => (
+                <li key={r.id} className="card p-4">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={r.image ?? ''}
+                    alt={r.title}
+                    className="h-48 w-full rounded-xl object-contain bg-slate-900/60"
+                    loading="lazy"
+                  />
+                  <h3 className="mt-3 line-clamp-2 font-medium">{r.title}</h3>
+                  <div className="mt-1 text-sm opacity-80">
+                    {toMoney(r.price, r.currency) ?? '—'}
+                  </div>
+                  <Link
+                    href={`/product/${r.id}`}
+                    className="btn mt-3"
+                    onClick={() => {
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem(
+                          'lastListPath',
+                          window.location.pathname + window.location.search
+                        );
+                      }
+                    }}
+                  >
+                    View
+                  </Link>
+                </li>
+              ))}
           </ul>
         </section>
-      )}
+      ) : null}
     </>
   );
 }
