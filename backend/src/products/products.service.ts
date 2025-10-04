@@ -22,11 +22,10 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  /** List products. Accepts category as UUID or human slug/title ("fiction", "non-fiction"). */
+  /** Accepts category as UUID or human slug/title (“fiction”, “non-fiction”). */
   async list(q: ListProductsQueryDto) {
     const page = Math.max(1, Number(q.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(q.limit ?? 12)));
-    const skip = (page - 1) * limit;
 
     let categoryIds: string[] | undefined;
 
@@ -34,7 +33,6 @@ export class ProductsService {
       if (uuidV4Rx.test(q.category)) {
         categoryIds = [q.category];
       } else {
-        // Strict match by slug or title
         const cats = await this.categories.find({
           where: [
             { slug: q.category },
@@ -45,7 +43,6 @@ export class ProductsService {
         });
         categoryIds = cats.map((c) => c.id);
 
-        // Fuzzy fallback on title
         if (!categoryIds.length) {
           const candidates = await this.categories.find({
             where: [{ title: ILike('%' + q.category + '%') }],
@@ -59,26 +56,24 @@ export class ProductsService {
     const [items, total] = await this.products.findAndCount({
       where: categoryIds?.length ? { category: { id: In(categoryIds) } } : {},
       relations: { category: true },
-      // Product doesn’t expose createdAt in the provided entities; stable sort by id.
-      order: { id: 'ASC' },
+      order: { id: 'ASC' }, // stable paging
       take: limit,
-      skip,
-      // Only what the UI needs
+      skip: (page - 1) * limit,
       select: {
         id: true,
         title: true,
         image: true,
         price: true,
         currency: true,
+        // list view doesn't need sourceUrl
         category: { id: true, title: true, slug: true },
       },
     });
 
-    const pages = Math.max(1, Math.ceil(total / limit));
-    return { items, total, page, limit, pages };
+    return { items, total, page, limit };
   }
 
-  /** Get product + detail; optionally refresh first. Never fail the read due to a scrape error. */
+  /** Get product + detail; optionally refresh before returning. */
   async getOneSafe(id: string, opts?: { refresh?: boolean }) {
     const exists = await this.products.findOne({
       where: { id },
@@ -90,7 +85,7 @@ export class ProductsService {
       try {
         await this.scraper.refreshProduct(id);
       } catch {
-        // Ignore scrape errors; we’ll still return current DB state.
+        // ignore scrape errors; return last known
       }
     }
 
@@ -103,7 +98,7 @@ export class ProductsService {
         image: true,
         price: true,
         currency: true,
-        sourceUrl: true,
+        sourceUrl: true, // <-- IMPORTANT: expose for “View on World of Books”
         category: { id: true, title: true, slug: true },
         detail: {
           id: true,
