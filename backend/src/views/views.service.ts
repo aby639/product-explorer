@@ -11,11 +11,11 @@ export class ViewsService {
     private readonly repo: Repository<ViewHistory>,
   ) {}
 
-  async create(body: CreateViewDto) {
-    const row = this.repo.create({
-      sessionId: body.sessionId,
-      pathJson: body.pathJson.slice(0, 20),
+  async create(dto: CreateViewDto) {
+    const vh = this.repo.create({
+      sessionId: dto.sessionId,
+      pathJson: dto.trail?.length ? dto.trail.concat(dto.path) : [dto.path],
     });
-    return this.repo.save(row);
+    return this.repo.save(vh);
   }
 }
