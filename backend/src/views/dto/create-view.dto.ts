@@ -1,4 +1,12 @@
+import { IsArray, IsNotEmpty, IsString, ArrayMinSize } from 'class-validator';
+
 export class CreateViewDto {
+  @IsString()
+  @IsNotEmpty()
   sessionId!: string;
-  path!: string | string[];
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  path!: string[];
 }
