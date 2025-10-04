@@ -23,7 +23,7 @@ const toHttps = (u?: string | null) => {
   }
 };
 
-type Category = { id: string; name: string; slug?: string | null };
+type Category = { id: string; title: string; slug?: string | null };
 type Product = {
   id: string;
   title: string;
@@ -62,7 +62,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   useEffect(() => setPage(1), [categoryId]);
 
-  // 1) Load all "books" categories to map slug -> UUID
+  // Load categories for books
   const catsUrl = `${API}/categories/books`;
   const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(catsUrl, fetcher, {
     revalidateOnFocus: false,
@@ -72,10 +72,10 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
     if (!cats) return undefined;
     const bySlug = cats.find((c) => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
     if (bySlug) return bySlug;
-    return cats.find((c) => c.name.toLowerCase() === categoryId.toLowerCase());
+    return cats.find((c) => c.title.toLowerCase() === categoryId.toLowerCase());
   }, [cats, categoryId]);
 
-  // 2) Fetch products for the resolved UUID
+  // Products for that category id
   const productsUrl = useMemo(() => {
     if (!matched?.id) return null;
     const params = new URLSearchParams({
@@ -144,8 +144,19 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
                     <span className="badge">{money(p.price, p.currency)}</span>
                   </div>
                 </div>
+
                 <h3 className="mt-3 line-clamp-2 text-lg font-medium leading-snug">{p.title}</h3>
-                <Link href={`/product/${p.id}`} className="btn mt-4" aria-label={`View details for ${p.title}`}>
+
+                <Link
+                  href={`/product/${p.id}`}
+                  onClick={() => {
+                    if (typeof window !== 'undefined') {
+                      localStorage.setItem('lastListPath', window.location.pathname + window.location.search);
+                    }
+                  }}
+                  className="btn mt-4"
+                  aria-label={`View details for ${p.title}`}
+                >
                   View details
                 </Link>
               </li>
