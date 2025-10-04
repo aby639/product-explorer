@@ -1,9 +1,9 @@
 import ProductClient from './ProductClient';
 
-const API = process.env.NEXT_PUBLIC_API_URL!;
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
-async function getProduct(id: string, force = false) {
-  const url = `${API}/products/${id}${force ? '?refresh=true' : ''}`;
+async function getProduct(id: string, refresh: boolean) {
+  const url = `${API}/products/${id}${refresh ? '?refresh=true' : ''}`;
   const r = await fetch(url, { cache: 'no-store' });
   if (!r.ok) return null;
   return r.json();
@@ -15,11 +15,20 @@ export default async function Page({
   params,
   searchParams,
 }: {
-  params: Promise<{ id: string }>;
-  searchParams?: Promise<{ refresh?: string }>;
+  params: { id: string };
+  searchParams?: { refresh?: string };
 }) {
-  const [{ id }, sp = {} as any] = await Promise.all([params, searchParams ?? Promise.resolve({})]);
-  const initial = await getProduct(id, sp?.refresh === 'true');
+  const product = await getProduct(params.id, searchParams?.refresh === 'true');
 
-  return <ProductClient id={id} initial={initial} />;
+  return (
+    <main className="container-xl py-8 space-y-6">
+      {!product ? (
+        <div className="card p-6">
+          <div className="text-lg font-semibold">Couldn’t load this product right now.</div>
+        </div>
+      ) : (
+        <ProductClient product={product} id={params.id} />
+      )}
+    </main>
+  );
 }
