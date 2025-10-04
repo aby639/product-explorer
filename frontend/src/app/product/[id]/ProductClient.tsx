@@ -1,11 +1,10 @@
 'use client';
 
-import useSWR from 'swr';
 import Link from 'next/link';
+import useSWR from 'swr';
 import { useEffect, useMemo } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
-const fetcher = (u: string) => fetch(u, { cache: 'no-store' }).then((r) => r.json());
 
 type Product = {
   id: string;
@@ -13,30 +12,40 @@ type Product = {
   image?: string | null;
   price?: number | null;
   currency?: string | null;
-  sourceUrl?: string | null; // if present in your API; if not, we’ll build from specs
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
+    id: string;
     description?: string | null;
+    ratingAverage?: number | null;
     lastScrapedAt?: string | null;
     specs?: Record<string, any> | null;
-    ratingAverage?: number | null;
   } | null;
 };
 
-type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
+type RelatedResp = { items: Array<{ id: string; title: string; image?: string | null; price?: number | null; currency?: string | null }> };
 
-const money = (v?: number | null, c?: string | null) =>
-  v != null && c
-    ? new Intl.NumberFormat(c === 'GBP' ? 'en-GB' : c === 'EUR' ? 'de-DE' : 'en-US', {
-        style: 'currency',
-        currency: c,
-      }).format(v)
-    : null;
+const fetcher = (url: string) =>
+  fetch(url, { cache: 'no-store' }).then((r) => {
+    if (!r.ok) throw new Error(`Failed (${r.status})`);
+    return r.json();
+  });
+
+function fmtMoney(v?: number | null, ccy?: string | null) {
+  if (v == null || !ccy) return null;
+  try {
+    return new Intl.NumberFormat(
+      ccy === 'GBP' ? 'en-GB' : ccy === 'EUR' ? 'de-DE' : 'en-US',
+      { style: 'currency', currency: ccy },
+    ).format(v);
+  } catch {
+    return `${Number(v).toFixed(2)} ${ccy}`;
+  }
+}
 
 function toHttps(u?: string | null) {
   if (!u) return null;
   try {
-    const url = new URL(u, 'https://www.worldofbooks.com');
+    const url = new URL(u);
     if (url.protocol === 'http:') url.protocol = 'https:';
     return url.toString();
   } catch {
@@ -44,140 +53,161 @@ function toHttps(u?: string | null) {
   }
 }
 
-export default function ProductClient({ product, id }: { product: Product; id: string }) {
-  // BACK target from localStorage
-  const backHref =
-    typeof window !== 'undefined' && localStorage.getItem('lastListPath')
-      ? (localStorage.getItem('lastListPath') as string)
-      : '/';
+function getSessionId(): string {
+  if (typeof window === 'undefined') return 'server';
+  const KEY = 'pe:session';
+  let v = localStorage.getItem(KEY);
+  if (!v) {
+    v = crypto.randomUUID();
+    localStorage.setItem(KEY, v);
+  }
+  return v;
+}
 
-  // Fire-and-forget view history (optional)
+export default function ProductClient({ product }: { product: Product }) {
+  const price = fmtMoney(product.price, product.currency);
+  const wobUrl = useMemo(() => {
+    // prefer detail.specs.sourceUrl if you stored it; else trust product.detail?.specs?.sourceUrl
+    const raw =
+      (product as any)?.sourceUrl ||
+      product?.detail?.specs?.sourceUrl ||
+      null;
+    return toHttps(raw);
+  }, [product]);
+
+  // --- view history ping (optional bonus) ---
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     try {
-      const sessionId =
-        localStorage.getItem('pe_session') || (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()));
-      localStorage.setItem('pe_session', sessionId);
-      const path = [window.location.pathname + window.location.search];
+      const body = {
+        sessionId: getSessionId(),
+        pathJson: [window.location.pathname],
+      };
       fetch(`${API}/views`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, path }),
-        keepalive: true,
-      }).catch(() => undefined);
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch(() => void 0);
     } catch {}
   }, []);
 
-  // related (by same category)
-  const relUrl = useMemo(() => {
-    const catId = product.category?.id;
-    if (!catId) return null;
-    const p = new URLSearchParams({ category: catId, page: '1', limit: '8' });
-    return `${API}/products?${p.toString()}`;
-  }, [product.category?.id]);
+  // --- related in same category ---
+  const relatedUrl = product.category?.id
+    ? `${API}/products?category=${product.category.id}&page=1&limit=6`
+    : null;
+  const { data: related } = useSWR<RelatedResp>(relatedUrl, fetcher, {
+    revalidateOnFocus: false,
+  });
+  const relatedItems = (related?.items || [])
+    .filter((p) => p.id !== product.id)
+    .slice(0, 4);
 
-  const { data: rel } = useSWR<GridResponse>(relUrl, relUrl ? fetcher : null, { revalidateOnFocus: false });
-
-  const worldOfBooksUrl =
-    product.sourceUrl ??
-    (product.detail?.specs && typeof product.detail.specs['wobUrl'] === 'string'
-      ? (product.detail!.specs!['wobUrl'] as string)
-      : null);
-
-  const safeImg = toHttps(product.image);
-  const priceText = money(product.price, product.currency);
+  // --- back behaviour: restore last list or fallback to /products ---
+  const backHref =
+    (typeof window !== 'undefined' && localStorage.getItem('lastListPath')) ||
+    '/products';
 
   return (
     <>
-      <Link href={backHref} className="btn">
+      <Link href={backHref} className="btn mb-4">
         ← Back
       </Link>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={safeImg ?? ''} alt={product.title} className="max-h-[420px] object-contain" />
+          <img
+            src={product.image ?? ''}
+            alt={product.title}
+            className="max-h-[520px] object-contain"
+          />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
-          {priceText ? <div className="text-xl font-semibold">{priceText}</div> : <div className="opacity-70">—</div>}
 
-          <div className="flex gap-3">
-            {worldOfBooksUrl && (
+          {price ? (
+            <div className="text-xl font-semibold">{price}</div>
+          ) : (
+            <div className="opacity-70">Price not available</div>
+          )}
+
+          <div className="flex flex-wrap gap-3">
+            {wobUrl && (
               <a
-                href={toHttps(worldOfBooksUrl) ?? '#'}
+                href={wobUrl}
                 target="_blank"
-                rel="noreferrer"
-                className="btn btn-ghost"
-                aria-label="View this book on World of Books"
+                rel="noopener noreferrer"
+                className="btn"
               >
                 View on World of Books
               </a>
             )}
-
-            <Link href={`/product/${id}?refresh=true`} className="btn btn-ghost">
+            <Link href={`/product/${product.id}?refresh=true`} className="btn btn-ghost">
               Force refresh
             </Link>
           </div>
 
+          {product?.detail?.ratingAverage ? (
+            <div className="text-sm opacity-90">
+              ⭐ {product.detail.ratingAverage.toFixed(1)} / 5
+            </div>
+          ) : null}
+
           {product?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-              <div className="whitespace-pre-line leading-relaxed">{product.detail.description}</div>
-
-              <div className="mt-2 text-xs opacity-60 flex gap-4 items-center">
-                {product.detail.ratingAverage != null && (
-                  <span>Rating: {Number(product.detail.ratingAverage).toFixed(1)} / 5</span>
-                )}
-                {product.detail.lastScrapedAt && (
-                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
-                )}
+              <div className="whitespace-pre-line leading-relaxed">
+                {product.detail.description}
               </div>
+              {product.detail.lastScrapedAt && (
+                <div className="mt-2 text-xs opacity-60">
+                  Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}
+                </div>
+              )}
             </div>
           )}
         </div>
       </section>
 
-      {rel?.items?.length ? (
-        <section className="mt-8">
-          <h2 className="mb-4 text-lg font-semibold">
-            Related in {product.category?.title ?? 'this category'}
+      {relatedItems.length > 0 && product.category?.title && (
+        <section className="mt-10 space-y-4">
+          <h2 className="text-lg font-semibold">
+            Related in {product.category.title}
           </h2>
-          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {rel.items
-              .filter((p) => p.id !== id)
-              .slice(0, 6)
-              .map((p) => (
-                <li key={p.id} className="card p-4">
-                  <div className="relative overflow-hidden rounded-xl">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={toHttps(p.image) ?? ''}
-                      alt={p.title}
-                      className="h-40 w-full rounded-xl bg-slate-900/60 object-contain"
-                    />
-                  </div>
-                  <h3 className="mt-3 line-clamp-2 font-medium">{p.title}</h3>
-                  <div className="opacity-70 text-sm">{money(p.price, p.currency) ?? '—'}</div>
-                  <Link
-                    href={`/product/${p.id}`}
-                    className="btn mt-3"
-                    onClick={() => {
-                      if (typeof window !== 'undefined') {
-                        localStorage.setItem(
-                          'lastListPath',
-                          window.location.pathname.replace(`/product/${id}`, `/products/${product.category?.slug ?? ''}`),
-                        );
-                      }
-                    }}
-                  >
-                    View
-                  </Link>
-                </li>
-              ))}
+          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {relatedItems.map((r) => (
+              <li key={r.id} className="card card-hover p-4">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={toHttps(r.image) ?? ''}
+                  alt={r.title}
+                  className="h-44 w-full rounded-xl bg-slate-900/60 object-contain"
+                />
+                <div className="mt-3 line-clamp-2 font-medium">{r.title}</div>
+                <div className="opacity-70 text-sm">
+                  {fmtMoney(r.price, r.currency) ?? '—'}
+                </div>
+                <Link
+                  href={`/product/${r.id}`}
+                  onClick={() => {
+                    // keep current list ref so Back works from child → parent
+                    if (typeof window !== 'undefined') {
+                      localStorage.setItem(
+                        'lastListPath',
+                        window.location.pathname,
+                      );
+                    }
+                  }}
+                  className="btn btn-ghost mt-3"
+                >
+                  View
+                </Link>
+              </li>
+            ))}
           </ul>
         </section>
-      ) : null}
+      )}
     </>
   );
 }
