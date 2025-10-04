@@ -1,27 +1,25 @@
-import Link from 'next/link';
-import { headers } from 'next/headers';
 import ProductClient from './ProductClient';
+
+const API = process.env.NEXT_PUBLIC_API_URL!;
+
+async function getProduct(id: string, force = false) {
+  const url = `${API}/products/${id}${force ? '?refresh=true' : ''}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) return null;
+  return r.json();
+}
 
 export const dynamic = 'force-dynamic';
 
 export default async function Page({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ refresh?: string }>;
 }) {
-  const { id } = await params;
+  const [{ id }, sp = {} as any] = await Promise.all([params, searchParams ?? Promise.resolve({})]);
+  const initial = await getProduct(id, sp?.refresh === 'true');
 
-  // Build a safe back link using the request's Referer header
-  const hdrs = headers();
-  const referer = hdrs.get('referer');
-  const host = hdrs.get('host');
-  let backHref = '/';
-  if (referer && host) {
-    try {
-      const u = new URL(referer);
-      if (u.host === host) backHref = u.pathname + u.search;
-    } catch {}
-  }
-
-  return <ProductClient id={id} backHref={backHref} />;
+  return <ProductClient id={id} initial={initial} />;
 }
