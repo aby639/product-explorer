@@ -1,13 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
-import useSWR from 'swr';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useMemo } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
-type Product = {
+export type Product = {
   id: string;
   title: string;
   image?: string | null;
@@ -15,91 +14,83 @@ type Product = {
   currency?: string | null;
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
+    id?: string;
     description?: string | null;
-    lastScrapedAt?: string | null;
     ratingAverage?: number | null;
-    specs?: Record<string, any> | null;
+    specs?: Record<string, unknown> | null;
+    lastScrapedAt?: string | null;
   } | null;
 };
 
-const fetcher = (url: string) =>
-  fetch(url, { cache: 'no-store' }).then((r) => {
-    if (!r.ok) throw new Error(`Failed to load (${r.status})`);
-    return r.json();
-  });
+function toHttps(u?: string | null): string | null {
+  if (!u) return null;
+  try {
+    const url = new URL(u, 'https://www.worldofbooks.com');
+    if (url.protocol === 'http:') url.protocol = 'https:';
+    return url.toString();
+  } catch {
+    return u;
+  }
+}
 
-const toMoney = (value?: number | null, currency?: string | null) => {
+function money(value?: number | null, currency?: string | null) {
   if (value == null || !currency) return null;
   try {
     return new Intl.NumberFormat(
       currency === 'GBP' ? 'en-GB' : currency === 'EUR' ? 'de-DE' : 'en-US',
-      { style: 'currency', currency }
+      { style: 'currency', currency },
     ).format(value);
   } catch {
     return `${Number(value)} ${currency}`;
   }
-};
-
-function Stars({ value }: { value: number }) {
-  const filled = Math.round(Math.max(0, Math.min(5, value)));
-  return (
-    <div aria-label={`Rating ${value} out of 5`} className="flex gap-1 text-yellow-300">
-      {Array.from({ length: 5 }).map((_, i) => (
-        <span key={i} aria-hidden>{i < filled ? '★' : '☆'}</span>
-      ))}
-      <span className="ml-2 text-xs opacity-75">{value.toFixed(1)}</span>
-    </div>
-  );
 }
 
 export default function ProductClient({ product }: { product: Product }) {
   const router = useRouter();
-  const sp = useSearchParams();
-  const refreshing = sp.get('refresh') === 'true';
 
-  // Post view event (persisted view history)
-  useEffect(() => {
-    const sessionId =
-      (typeof window !== 'undefined' && localStorage.getItem('pe_session')) ||
-      (Math.random().toString(36).slice(2) + Date.now().toString(36));
-    if (typeof window !== 'undefined') localStorage.setItem('pe_session', sessionId);
+  // —— Resolve source/origin URL without TS index errors ——
+  const pAny = product as unknown as Record<string, any>;
+  const sourceUrl: string | null =
+    toHttps(
+      pAny?.detail?.specs?.sourceUrl ??
+        pAny?.detail?.specs?.source_url ??
+        pAny?.sourceUrl ??
+        pAny?.source_url ??
+        null,
+    ) ?? null;
 
-    fetch(`${API}/views`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, path: window.location.pathname }),
-    }).catch(() => undefined);
-  }, []);
+  const priceFormatted = money(product.price, product.currency);
 
-  // Related in same category (simple recommendation strip)
+  // Small helper: go “Back” to the last list path if we saved one from the grid
+  const doBack = () => {
+    if (typeof window !== 'undefined') {
+      const last = localStorage.getItem('lastListPath');
+      if (last) {
+        router.push(last);
+        return;
+      }
+      // Fallback: history back or home
+      if (window.history.length > 1) window.history.back();
+      else router.push('/');
+    }
+  };
+
+  // Related strip: naive — same category, excluding this product
   const relatedUrl = useMemo(() => {
-    const cid = product.category?.id;
-    if (!cid) return null;
-    const p = new URLSearchParams({ category: cid, limit: '12', page: '1' });
-    return `${API}/products?${p.toString()}`;
-  }, [product.category?.id]);
-
-  const { data: related } = useSWR<{ items: Product[] }>(relatedUrl, fetcher, {
-    revalidateOnFocus: false,
-  });
-
-  const money = toMoney(product.price, product.currency);
-  const wobUrl =
-    product.detail?.specs?.sourceUrl ??
-    product.detail?.specs?.source_url ??
-    product['sourceUrl' as any] ??
-    product['source_url' as any] ??
-    undefined;
-
-  const onBack = useCallback(() => {
-    const last = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
-    if (last) router.push(last);
-    else router.back();
-  }, [router]);
+    if (!product?.category?.id) return null;
+    const params = new URLSearchParams({
+      category: product.category.id,
+      page: '1',
+      limit: '8',
+    });
+    return `${API}/products?${params.toString()}`;
+  }, [product?.category?.id]);
 
   return (
     <>
-      <button onClick={onBack} className="btn">← Back</button>
+      <button className="btn" onClick={doBack}>
+        ← Back
+      </button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
@@ -107,27 +98,23 @@ export default function ProductClient({ product }: { product: Product }) {
           <img
             src={product.image ?? ''}
             alt={product.title}
-            className="max-h-[420px] object-contain"
+            className="max-h-[480px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
 
-          {money ? (
-            <div className="text-xl font-semibold">{money}</div>
+          {priceFormatted ? (
+            <div className="text-xl font-semibold">{priceFormatted}</div>
           ) : (
             <div className="opacity-70">Price not available</div>
           )}
 
-          {product.detail?.ratingAverage != null && (
-            <Stars value={product.detail.ratingAverage} />
-          )}
-
-          <div className="flex gap-3">
-            {wobUrl && (
+          <div className="flex flex-wrap gap-3">
+            {sourceUrl && (
               <a
-                href={wobUrl}
+                href={sourceUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn btn-ghost"
@@ -135,14 +122,17 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            <Link
-              href={`/product/${product.id}?refresh=true`}
-              className={`btn ${refreshing ? 'opacity-60 cursor-wait' : ''}`}
-              prefetch={false}
-            >
-              {refreshing ? 'Refreshing…' : 'Force refresh'}
+            <Link href={`/product/${product.id}?refresh=true`} className="btn btn-ghost">
+              Force refresh
             </Link>
           </div>
+
+          {product?.detail?.ratingAverage != null && (
+            <div className="text-sm">
+              <span className="opacity-70">Rating:</span>{' '}
+              <span className="font-medium">{product.detail.ratingAverage} / 5</span>
+            </div>
+          )}
 
           {product?.detail?.description && (
             <div className="card p-4">
@@ -160,47 +150,79 @@ export default function ProductClient({ product }: { product: Product }) {
         </div>
       </section>
 
-      {related?.items?.length ? (
-        <section className="mt-10">
-          <h2 className="text-lg font-semibold mb-4">
-            Related in {product.category?.title ?? 'this category'}
-          </h2>
-          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {related.items
-              .filter((r) => r.id !== product.id)
-              .slice(0, 6)
-              .map((r) => (
-                <li key={r.id} className="card p-4">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={r.image ?? ''}
-                    alt={r.title}
-                    className="h-48 w-full rounded-xl object-contain bg-slate-900/60"
-                    loading="lazy"
-                  />
-                  <h3 className="mt-3 line-clamp-2 font-medium">{r.title}</h3>
-                  <div className="mt-1 text-sm opacity-80">
-                    {toMoney(r.price, r.currency) ?? '—'}
-                  </div>
-                  <Link
-                    href={`/product/${r.id}`}
-                    className="btn mt-3"
-                    onClick={() => {
-                      if (typeof window !== 'undefined') {
-                        localStorage.setItem(
-                          'lastListPath',
-                          window.location.pathname + window.location.search
-                        );
-                      }
-                    }}
-                  >
-                    View
-                  </Link>
-                </li>
-              ))}
-          </ul>
-        </section>
-      ) : null}
+      {/* Related strip */}
+      {relatedUrl && (
+        <RelatedStrip
+          url={relatedUrl}
+          currentId={product.id}
+          sectionTitle={`Related in ${product?.category?.title ?? 'category'}`}
+        />
+      )}
     </>
+  );
+}
+
+/* -------------------------- Related strip (SWR) -------------------------- */
+
+import useSWR from 'swr';
+
+type RelatedResp = {
+  items: Array<{ id: string; title: string; image?: string | null; price?: number | null; currency?: string | null }>;
+};
+
+function RelatedStrip({
+  url,
+  currentId,
+  sectionTitle,
+}: {
+  url: string;
+  currentId: string;
+  sectionTitle: string;
+}) {
+  const { data } = useSWR<RelatedResp>(url, (u) => fetch(u).then((r) => r.json()), {
+    revalidateOnFocus: false,
+  });
+
+  const items = (data?.items ?? []).filter((x) => x.id !== currentId);
+
+  if (!items.length) return null;
+
+  return (
+    <section className="mt-10 space-y-4">
+      <h2 className="text-lg font-semibold">{sectionTitle}</h2>
+      <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {items.slice(0, 6).map((p) => (
+          <li key={p.id} className="card p-4">
+            <div className="relative overflow-hidden rounded-xl">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={toHttps(p.image) ?? ''}
+                alt={p.title}
+                className="h-40 w-full rounded-xl bg-slate-900/60 object-contain"
+                loading="lazy"
+              />
+            </div>
+            <div className="mt-3 text-base font-medium line-clamp-2">{p.title}</div>
+            <div className="mt-1 text-sm opacity-70">
+              {money(p.price, p.currency) ?? ''}
+            </div>
+            <Link
+              href={`/product/${p.id}`}
+              onClick={() => {
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem(
+                    'lastListPath',
+                    window.location.pathname + window.location.search,
+                  );
+                }
+              }}
+              className="btn mt-3"
+            >
+              View
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
