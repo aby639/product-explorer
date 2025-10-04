@@ -16,7 +16,7 @@ export class ProductDetail {
   @Column({ type: 'float', nullable: true })
   ratingAverage?: number | null;
 
-  // 👇 NEW: flexible JSON bag for extras (recommendations, specs, etc.)
+  // Flexible JSON bag for extras (recommendations, specs, probes, etc.)
   @Column({ type: 'jsonb', nullable: true, default: () => `'{}'::jsonb` })
   specs?: Record<string, any> | null;
 
