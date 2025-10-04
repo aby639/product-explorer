@@ -8,16 +8,16 @@ type Product = {
   image?: string | null;
   price?: number | null;
   currency?: string | null;
+  sourceUrl?: string | null; // <-- link back to WOB
   detail?: {
     description?: string | null;
-    url?: string | null;
     lastScrapedAt?: string | null;
   } | null;
 };
 
 async function getProduct(id: string, force = false) {
   const url = `${API}/products/${id}${force ? '?refresh=true' : ''}`;
-  // Use only cache: 'no-store' to remove the warning
+  // Remove Next warning: use only cache: 'no-store'
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error('Failed to load product');
   return (await res.json()) as Product;
@@ -51,6 +51,7 @@ export default async function Page({
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
+
           {product.price != null && product.currency ? (
             <div className="text-xl font-semibold">
               {new Intl.NumberFormat(
@@ -63,8 +64,8 @@ export default async function Page({
           )}
 
           <div className="flex gap-3">
-            {product?.detail?.url && (
-              <a href={product.detail.url} target="_blank" rel="noreferrer" className="btn">
+            {product?.sourceUrl && (
+              <a href={product.sourceUrl} target="_blank" rel="noreferrer" className="btn">
                 View on World of Books
               </a>
             )}
