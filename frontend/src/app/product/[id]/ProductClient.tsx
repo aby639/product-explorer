@@ -1,11 +1,11 @@
 'use client';
 
-import useSWR, { mutate } from 'swr';
+import useSWR from 'swr';
 import Link from 'next/link';
 import { useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 
-const API = process.env.NEXT_PUBLIC_API_URL!;
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
 type Product = {
   id: string;
@@ -17,151 +17,174 @@ type Product = {
   category?: { id: string; title: string; slug: string } | null;
   detail?: {
     description?: string | null;
+    ratingAverage?: number | null; // 0..5 (or null)
     lastScrapedAt?: string | null;
-    ratingAverage?: number | null;
-    specs?: Record<string, any> | null;
+    specs?: any;
   } | null;
 };
 
-type ProductsList = {
-  items: Product[];
-  total: number;
-  page: number;
-  limit: number;
+const fetcher = (url: string) =>
+  fetch(url, { cache: 'no-store' }).then((r) => {
+    if (!r.ok) throw new Error(`Failed to load (${r.status})`);
+    return r.json();
+  });
+
+const toHttps = (u?: string | null) => {
+  if (!u) return null;
+  try {
+    const url = new URL(u);
+    if (url.protocol === 'http:') url.protocol = 'https:';
+    return url.toString();
+  } catch {
+    return u;
+  }
 };
 
-const fetcher = (url: string) => fetch(url, { cache: 'no-store' }).then((r) => {
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
-});
-
-function formatMoney(p?: number | null, c?: string | null) {
-  if (p == null || !c) return null;
-  return new Intl.NumberFormat(
-    c === 'GBP' ? 'en-GB' : c === 'EUR' ? 'de-DE' : 'en-US',
-    { style: 'currency', currency: c },
-  ).format(p);
+function BackButton() {
+  const router = useRouter();
+  return (
+    <button
+      className="btn"
+      onClick={() => {
+        if (typeof window !== 'undefined' && window.history.length > 1) {
+          router.back();
+        } else {
+          const lastList = localStorage.getItem('lastListPath') || '/categories/books';
+          router.push(lastList);
+        }
+      }}
+    >
+      ← Back
+    </button>
+  );
 }
 
-// star display (simple)
-function Stars({ value }: { value?: number | null }) {
-  if (!value || value <= 0) return null;
-  const filled = Math.round(Math.min(5, Math.max(0, value)));
+function Stars({ value }: { value: number }) {
+  const clamped = Math.max(0, Math.min(5, value));
+  const full = Math.floor(clamped);
+  const half = clamped - full >= 0.5;
+  const empty = 5 - full - (half ? 1 : 0);
   return (
-    <div aria-label={`${value} out of 5`} className="text-sm opacity-80">
-      {'★'.repeat(filled)}{'☆'.repeat(5 - filled)} <span className="ml-1">({value.toFixed(1)})</span>
+    <div className="flex items-center gap-1 text-amber-400">
+      {Array.from({ length: full }).map((_, i) => (
+        <span key={`f${i}`} aria-hidden>★</span>
+      ))}
+      {half && <span aria-hidden>☆</span>}
+      {Array.from({ length: empty }).map((_, i) => (
+        <span key={`e${i}`} className="opacity-40" aria-hidden>★</span>
+      ))}
     </div>
   );
 }
 
-export default function ProductClient({
-  id,
-  backHref,
-}: {
-  id: string;
-  backHref: string;
-}) {
-  const router = useRouter();
+export default function ProductClient({ id, initial }: { id: string; initial: Product | null }) {
+  const { data: product, isLoading, mutate } = useSWR<Product | null>(`${API}/products/${id}`, fetcher, {
+    fallbackData: initial,
+  });
 
-  // primary product
-  const { data: product, isLoading, error } = useSWR<Product>(`${API}/products/${id}`, fetcher);
-
-  // track a "view" once the product loads
+  // record a “view” (optional persisted history)
   useEffect(() => {
     if (!product?.id) return;
-    const ctrl = new AbortController();
+    const session =
+      localStorage.getItem('pe_session') ||
+      (localStorage.setItem('pe_session', crypto.randomUUID()), localStorage.getItem('pe_session'));
     fetch(`${API}/views`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ productId: product.id }),
-      signal: ctrl.signal,
+      body: JSON.stringify({
+        productId: product.id,
+        path: location.pathname + location.search,
+        session,
+      }),
     }).catch(() => void 0);
-    return () => ctrl.abort();
   }, [product?.id]);
 
-  // related: fetch more items from the same category (exclude current)
-  const catSlug = product?.category?.slug;
-  const { data: related } = useSWR<ProductsList>(
-    catSlug ? `${API}/products?category=${encodeURIComponent(catSlug)}&page=1&limit=6` : null,
+  // fetch related (same category)
+  const { data: related } = useSWR<{ items: Product[] } | null>(
+    () => (product?.category?.slug ? `${API}/products?category=${encodeURIComponent(product.category.slug)}&limit=8` : null),
     fetcher,
+    { fallbackData: null },
   );
 
-  const relatedItems = useMemo(
-    () => (related?.items || []).filter((p) => p.id !== product?.id),
-    [related?.items, product?.id],
-  );
+  const money =
+    product?.price != null && product?.currency
+      ? new Intl.NumberFormat(
+          product.currency === 'GBP' ? 'en-GB' : product.currency === 'EUR' ? 'de-DE' : 'en-US',
+          { style: 'currency', currency: product.currency },
+        ).format(product.price)
+      : null;
 
-  const money = formatMoney(product?.price, product?.currency);
-  const sourceUrl = product?.sourceUrl ?? (product?.detail?.specs as any)?.origin ?? null;
+  const wobUrl = toHttps(product?.sourceUrl ?? product?.detail?.specs?.origin ?? null);
+  const rating = product?.detail?.ratingAverage ?? null;
 
-  if (isLoading) {
+  if (isLoading && !product) {
     return (
       <main className="container-xl py-8 space-y-6">
-        <button onClick={() => router.back()} className="btn">← Back</button>
+        <BackButton />
         <div className="card p-6">Loading…</div>
       </main>
     );
   }
 
-  if (error || !product) {
+  if (!product) {
     return (
       <main className="container-xl py-8 space-y-6">
-        <Link href={backHref} className="btn">← Back</Link>
+        <BackButton />
         <div className="card p-6">
           <div className="text-lg font-semibold">Couldn’t load this product right now.</div>
-          <p className="opacity-70 mt-1">Please try again in a moment.</p>
           <div className="mt-4 flex gap-3">
-            <button
-              className="btn"
-              onClick={async () => {
-                await mutate(`${API}/products/${id}`); // refetch
-              }}
-            >
-              Try refresh
+            <button className="btn" onClick={() => mutate()}>
+              Try again
             </button>
-            <Link href="/categories/books" className="btn btn-ghost">Browse categories</Link>
+            <Link href="/categories/books" className="btn btn-ghost">
+              Browse categories
+            </Link>
           </div>
         </div>
       </main>
     );
   }
 
+  // remove self from related list (and keep at most 8)
+  const relatedItems = useMemo(
+    () => (related?.items || []).filter((p) => p.id !== product.id).slice(0, 8),
+    [related?.items, product.id],
+  );
+
   return (
-    <main className="container-xl py-8 space-y-6">
-      <Link href={backHref} className="btn">← Back</Link>
+    <main className="container-xl py-8 space-y-8">
+      <BackButton />
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={product.image ?? ''}
-            alt={product.title}
-            className="max-h-[420px] object-contain"
-          />
+          <img src={product.image ?? ''} alt={product.title} className="max-h-[420px] object-contain" />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
-          {money ? <div className="text-xl font-semibold">{money}</div> : <div className="opacity-70">Price not available</div>}
-          <Stars value={product?.detail?.ratingAverage ?? null} />
+
+          <div className="flex items-center gap-4">
+            {money ? <div className="text-xl font-semibold">{money}</div> : <div className="opacity-70">Price not available</div>}
+            {typeof rating === 'number' && rating > 0 && (
+              <div className="flex items-center gap-2">
+                <Stars value={rating} />
+                <span className="text-sm opacity-80">{rating.toFixed(1)} / 5</span>
+              </div>
+            )}
+          </div>
 
           <div className="flex gap-3">
-            {sourceUrl && (
-              <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-ghost">
+            {wobUrl && (
+              <a href={wobUrl} target="_blank" rel="noreferrer" className="btn btn-ghost">
                 View on World of Books
               </a>
             )}
             <button
               className="btn btn-ghost"
               onClick={async () => {
-                // Force a fresh scrape on the server, then revalidate SWR keys
-                try {
-                  await fetch(`${API}/products/${product.id}?refresh=true`, { cache: 'no-store' });
-                } catch {}
-                await Promise.all([
-                  mutate(`${API}/products/${id}`),
-                  catSlug ? mutate(`${API}/products?category=${encodeURIComponent(catSlug)}&page=1&limit=6`) : Promise.resolve(),
-                ]);
+                await fetch(`${API}/products/${product.id}?refresh=true`, { cache: 'no-store' }).catch(() => void 0);
+                mutate(); // re-fetch after server completes (cooldown prevents hammering)
               }}
             >
               Force refresh
@@ -182,21 +205,42 @@ export default function ProductClient({
         </div>
       </section>
 
-      {/* Related/recommendations */}
-      {!!relatedItems.length && (
+      {relatedItems.length > 0 && (
         <section className="space-y-3">
-          <h2 className="section-subtitle">Related in {product.category?.title}</h2>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {relatedItems.map((p) => (
-              <Link key={p.id} href={`/product/${p.id}`} className="card p-4 hover:opacity-90 transition">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={p.image ?? ''} alt={p.title} className="h-40 w-full object-contain mb-3" />
-                <div className="font-medium">{p.title}</div>
-                <div className="opacity-70 text-sm mt-1">
-                  {formatMoney(p.price, p.currency) ?? '—'}
+          <h2 className="text-lg font-semibold">
+            Related in {product.category?.title || 'this category'}
+          </h2>
+
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {relatedItems.map((p) => {
+              const price =
+                p.price != null && p.currency
+                  ? new Intl.NumberFormat(p.currency === 'GBP' ? 'en-GB' : 'en-US', {
+                      style: 'currency',
+                      currency: p.currency,
+                    }).format(p.price)
+                  : null;
+
+              return (
+                <div key={p.id} className="card p-4 space-y-3">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={p.image ?? ''} alt={p.title} className="h-40 object-contain mx-auto" />
+                  <div className="font-medium line-clamp-2">{p.title}</div>
+                  {price && <div className="text-sm opacity-80">{price}</div>}
+                  <Link
+                    href={`/product/${p.id}`}
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('lastListPath', window.location.pathname + window.location.search);
+                      }
+                    }}
+                  >
+                    View
+                  </Link>
                 </div>
-              </Link>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
