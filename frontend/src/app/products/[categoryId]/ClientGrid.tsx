@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
 const fetcher = (url: string) =>
-  fetch(url).then(r => {
+  fetch(url).then((r) => {
     if (!r.ok) throw new Error(`Failed to load (${r.status})`);
     return r.json();
   });
@@ -38,7 +38,7 @@ function money(value?: number | null, currency?: string | null) {
   try {
     return new Intl.NumberFormat(
       currency === 'GBP' ? 'en-GB' : currency === 'EUR' ? 'de-DE' : 'en-US',
-      { style: 'currency', currency }
+      { style: 'currency', currency },
     ).format(value);
   } catch {
     return `${Number(value)} ${currency}`;
@@ -60,26 +60,22 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
   const [page, setPage] = useState(1);
   const defaultLimit = 12;
 
-  // reset pagination when category changes
   useEffect(() => setPage(1), [categoryId]);
 
-  // 1) load all "books" categories to map slug -> UUID
+  // 1) Load all "books" categories to map slug -> UUID
   const catsUrl = `${API}/categories/books`;
-  const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(
-    catsUrl,
-    fetcher,
-    { revalidateOnFocus: false }
-  );
+  const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(catsUrl, fetcher, {
+    revalidateOnFocus: false,
+  });
 
-  // Try match by slug first; fall back to case-insensitive name match.
   const matched = useMemo(() => {
     if (!cats) return undefined;
-    const bySlug = cats.find(c => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
+    const bySlug = cats.find((c) => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
     if (bySlug) return bySlug;
-    return cats.find(c => c.name.toLowerCase() === categoryId.toLowerCase());
+    return cats.find((c) => c.name.toLowerCase() === categoryId.toLowerCase());
   }, [cats, categoryId]);
 
-  // 2) once we have the UUID, fetch products
+  // 2) Fetch products for the resolved UUID
   const productsUrl = useMemo(() => {
     if (!matched?.id) return null;
     const params = new URLSearchParams({
@@ -102,7 +98,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
   const isLoading = catsLoading || prodLoading;
   const error = catsErr || prodErr;
 
-  const items = (data?.items ?? []).map(p => ({ ...p, image: toHttps(p.image) }));
+  const items = (data?.items ?? []).map((p) => ({ ...p, image: toHttps(p.image) }));
   const total = typeof data?.total === 'number' ? data!.total : 0;
   const pageSize = typeof data?.limit === 'number' ? data!.limit : defaultLimit;
   const pages = Math.max(1, Math.ceil(total / pageSize));
@@ -113,7 +109,6 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   return (
     <div className="space-y-5">
-      {/* category not found */}
       {!isLoading && !matched && (
         <div className="card p-4 text-sm">
           <div className="font-medium">Unknown category: “{categoryId}”.</div>
@@ -131,7 +126,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
       <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {isLoading || !matched
           ? Array.from({ length: 6 }).map((_, i) => <CardSkeleton key={i} />)
-          : items.map(p => (
+          : items.map((p) => (
               <li key={p.id} className="group card card-hover card-raise p-4 hover:border-white/20">
                 <div className="relative overflow-hidden rounded-xl">
                   {p.image ? (
@@ -168,7 +163,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
         <button
           className="btn disabled:opacity-50"
           disabled={page <= 1 || isLoading}
-          onClick={() => setPage(p => Math.max(1, p - 1))}
+          onClick={() => setPage((p) => Math.max(1, p - 1))}
         >
           Prev
         </button>
@@ -178,7 +173,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
         <button
           className="btn disabled:opacity-50"
           disabled={page >= pages || isLoading}
-          onClick={() => setPage(p => Math.min(pages, p + 1))}
+          onClick={() => setPage((p) => Math.min(pages, p + 1))}
         >
           Next
         </button>
