@@ -8,19 +8,22 @@ type Product = {
   image?: string | null;
   price?: number | null;
   currency?: string | null;
-  sourceUrl?: string | null; // <-- link back to WOB
   detail?: {
     description?: string | null;
     lastScrapedAt?: string | null;
+    // (optionally include origin url in detail.specs if you stored it)
   } | null;
 };
 
 async function getProduct(id: string, force = false) {
   const url = `${API}/products/${id}${force ? '?refresh=true' : ''}`;
-  // Remove Next warning: use only cache: 'no-store'
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error('Failed to load product');
-  return (await res.json()) as Product;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+    return (await res.json()) as Product;
+  } catch {
+    return null;
+  }
 }
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +37,32 @@ export default async function Page({
 }) {
   const [{ id }, sp = {} as any] = await Promise.all([params, searchParams ?? Promise.resolve({})]);
   const product = await getProduct(id, sp?.refresh === 'true');
+
+  if (!product) {
+    return (
+      <main className="container-xl py-8 space-y-6">
+        <Link href="/" className="btn">← Back</Link>
+        <div className="card p-6">
+          <div className="text-lg font-semibold">Couldn’t load this product right now.</div>
+          <p className="opacity-70 mt-1">
+            Please try again in a moment or go back and pick another one.
+          </p>
+          <div className="mt-4 flex gap-3">
+            <Link href={`/product/${id}?refresh=true`} className="btn">Try refresh</Link>
+            <Link href="/categories/books" className="btn btn-ghost">Browse categories</Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  const money =
+    product.price != null && product.currency
+      ? new Intl.NumberFormat(
+          product.currency === 'GBP' ? 'en-GB' : product.currency === 'EUR' ? 'de-DE' : 'en-US',
+          { style: 'currency', currency: product.currency },
+        ).format(product.price)
+      : null;
 
   return (
     <main className="container-xl py-8 space-y-6">
@@ -51,24 +80,9 @@ export default async function Page({
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
-
-          {product.price != null && product.currency ? (
-            <div className="text-xl font-semibold">
-              {new Intl.NumberFormat(
-                product.currency === 'GBP' ? 'en-GB' : product.currency === 'EUR' ? 'de-DE' : 'en-US',
-                { style: 'currency', currency: product.currency }
-              ).format(product.price)}
-            </div>
-          ) : (
-            <div className="opacity-70">Price not available</div>
-          )}
+          {money ? <div className="text-xl font-semibold">{money}</div> : <div className="opacity-70">Price not available</div>}
 
           <div className="flex gap-3">
-            {product?.sourceUrl && (
-              <a href={product.sourceUrl} target="_blank" rel="noreferrer" className="btn">
-                View on World of Books
-              </a>
-            )}
             <Link href={`/product/${product.id}?refresh=true`} className="btn btn-ghost">
               Force refresh
             </Link>
