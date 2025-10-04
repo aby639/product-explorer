@@ -1,33 +1,18 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, UsePipes, ValidationPipe } from '@nestjs/common';
 import { ProductsService } from './products.service';
-
-class ListQuery {
-  category?: string; // uuid | slug | comma-separated
-  page?: string | number;
-  limit?: string | number;
-}
+import { ListProductsQueryDto } from './dto/get-products.dto';
 
 @Controller('products')
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
   @Get()
-  async list(@Query() q: ListQuery) {
-    // normalize numbers
-    const page = q.page != null ? Number(q.page) : undefined;
-    const limit = q.limit != null ? Number(q.limit) : undefined;
-
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async list(@Query() q: ListProductsQueryDto) {
     return this.products.list({
       category: q.category,
-      page,
-      limit,
+      page: q.page,
+      limit: q.limit,
     });
-  }
-
-  @Get(':id')
-  async getOne(@Query() _q: any) {
-    // This route is actually defined in another controller in your repo (products.controller.ts),
-    // but keeping here in case you’ve co-located. If you already have /products/:id, keep that file.
-    return { ok: true };
   }
 }
