@@ -1,3 +1,5 @@
+// backend/src/entities/index.ts
+
 // Barrel exports
 export * from './navigation.entity';
 export * from './category.entity';
@@ -6,8 +8,8 @@ export * from './product-detail.entity';
 export * from './review.entity';
 export * from './view-history.entity';
 
-// IMPORTANT: make ENTITIES a mutable array with the expected type
-import { EntitySchema } from 'typeorm';
+// IMPORTANT: keep ENTITIES a concrete array of classes/schemas for TypeORM
+import type { EntitySchema } from 'typeorm';
 import { Navigation } from './navigation.entity';
 import { Category } from './category.entity';
 import { Product } from './product.entity';
