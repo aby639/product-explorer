@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, Max, Min, IsString } from 'class-validator';
 
 export class ListProductsQueryDto {
   @IsOptional()
@@ -15,7 +15,12 @@ export class ListProductsQueryDto {
   @Max(50)
   limit?: number = 12;
 
-  // Can be UUID, slug, name or comma-separated list
+  /**
+   * Can be:
+   * - a Category UUID
+   * - a slug (e.g. "fiction", "non-fiction")
+   * - a case-insensitive category name ("Fiction")
+   */
   @IsOptional()
   @IsString()
   category?: string;
