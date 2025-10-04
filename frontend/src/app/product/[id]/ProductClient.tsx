@@ -1,96 +1,73 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useMemo } from 'react';
+import useSWR from 'swr';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
-export type Product = {
+type Product = {
   id: string;
   title: string;
   image?: string | null;
   price?: number | null;
   currency?: string | null;
+  sourceUrl?: string | null; // optional at root
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
-    id?: string;
     description?: string | null;
     ratingAverage?: number | null;
-    specs?: Record<string, unknown> | null;
     lastScrapedAt?: string | null;
+    specs?: Record<string, any> | null; // free-form bag
   } | null;
 };
 
-function toHttps(u?: string | null): string | null {
-  if (!u) return null;
-  try {
-    const url = new URL(u, 'https://www.worldofbooks.com');
-    if (url.protocol === 'http:') url.protocol = 'https:';
-    return url.toString();
-  } catch {
-    return u;
-  }
-}
+type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
 
-function money(value?: number | null, currency?: string | null) {
-  if (value == null || !currency) return null;
-  try {
-    return new Intl.NumberFormat(
-      currency === 'GBP' ? 'en-GB' : currency === 'EUR' ? 'de-DE' : 'en-US',
-      { style: 'currency', currency },
-    ).format(value);
-  } catch {
-    return `${Number(value)} ${currency}`;
-  }
-}
+const fetcher = (url: string) => fetch(url).then((r) => (r.ok ? r.json() : Promise.reject(r)));
+
+const money = (value?: number | null, currency?: string | null) =>
+  value != null && currency
+    ? new Intl.NumberFormat(currency === 'GBP' ? 'en-GB' : 'en-US', {
+        style: 'currency',
+        currency,
+      }).format(value)
+    : null;
 
 export default function ProductClient({ product }: { product: Product }) {
-  const router = useRouter();
-
-  // —— Resolve source/origin URL without TS index errors ——
-  const pAny = product as unknown as Record<string, any>;
-  const sourceUrl: string | null =
-    toHttps(
-      pAny?.detail?.specs?.sourceUrl ??
-        pAny?.detail?.specs?.source_url ??
-        pAny?.sourceUrl ??
-        pAny?.source_url ??
-        null,
-    ) ?? null;
-
-  const priceFormatted = money(product.price, product.currency);
-
-  // Small helper: go “Back” to the last list path if we saved one from the grid
-  const doBack = () => {
-    if (typeof window !== 'undefined') {
-      const last = localStorage.getItem('lastListPath');
-      if (last) {
-        router.push(last);
-        return;
-      }
-      // Fallback: history back or home
-      if (window.history.length > 1) window.history.back();
-      else router.push('/');
-    }
+  // one & only Back button — prefers the last list we saved, else history.back(), else home
+  const handleBack = () => {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
+    if (saved) window.location.href = saved;
+    else if (history.length > 1) history.back();
+    else window.location.href = '/';
   };
 
-  // Related strip: naive — same category, excluding this product
-  const relatedUrl = useMemo(() => {
-    if (!product?.category?.id) return null;
-    const params = new URLSearchParams({
-      category: product.category.id,
-      page: '1',
-      limit: '8',
-    });
-    return `${API}/products?${params.toString()}`;
-  }, [product?.category?.id]);
+  const price = money(product.price, product.currency);
+
+  // try to find the canonical source URL from several places but **typed**
+  const sourceUrl: string | undefined =
+    product.detail?.specs?.sourceUrl ??
+    product.detail?.specs?.source_url ??
+    product.sourceUrl ??
+    (product.detail?.specs?.url as string | undefined);
+
+  // related products from the same category (exclude current)
+  const relatedUrl =
+    product.category?.id
+      ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
+      : null;
+
+  const { data: related } = useSWR<GridResponse>(relatedUrl, fetcher, {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+  });
+
+  const relatedItems =
+    (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
 
   return (
     <>
-      <button className="btn" onClick={doBack}>
-        ← Back
-      </button>
+      <button onClick={handleBack} className="btn">← Back</button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
@@ -98,27 +75,17 @@ export default function ProductClient({ product }: { product: Product }) {
           <img
             src={product.image ?? ''}
             alt={product.title}
-            className="max-h-[480px] object-contain"
+            className="max-h-[420px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
+          {price ? <div className="text-xl font-semibold">{price}</div> : <div className="opacity-70">Price not available</div>}
 
-          {priceFormatted ? (
-            <div className="text-xl font-semibold">{priceFormatted}</div>
-          ) : (
-            <div className="opacity-70">Price not available</div>
-          )}
-
-          <div className="flex flex-wrap gap-3">
+          <div className="flex gap-3">
             {sourceUrl && (
-              <a
-                href={sourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn btn-ghost"
-              >
+              <a href={sourceUrl} target="_blank" rel="noreferrer" className="btn btn-ghost">
                 View on World of Books
               </a>
             )}
@@ -127,102 +94,48 @@ export default function ProductClient({ product }: { product: Product }) {
             </Link>
           </div>
 
-          {product?.detail?.ratingAverage != null && (
-            <div className="text-sm">
-              <span className="opacity-70">Rating:</span>{' '}
-              <span className="font-medium">{product.detail.ratingAverage} / 5</span>
-            </div>
-          )}
-
           {product?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-              <div className="whitespace-pre-line leading-relaxed">
-                {product.detail.description}
+              <div className="whitespace-pre-line leading-relaxed">{product.detail.description}</div>
+              <div className="mt-2 text-xs opacity-60 flex gap-3">
+                {product.detail.lastScrapedAt && (
+                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+                )}
+                {typeof product.detail.ratingAverage === 'number' && (
+                  <span>Rating: {product.detail.ratingAverage.toFixed(1)} / 5</span>
+                )}
               </div>
-              {product.detail.lastScrapedAt && (
-                <div className="mt-2 text-xs opacity-60">
-                  Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}
-                </div>
-              )}
             </div>
           )}
         </div>
       </section>
 
-      {/* Related strip */}
-      {relatedUrl && (
-        <RelatedStrip
-          url={relatedUrl}
-          currentId={product.id}
-          sectionTitle={`Related in ${product?.category?.title ?? 'category'}`}
-        />
+      {relatedItems.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-lg font-semibold">
+            Related in {product.category?.title ?? 'this category'}
+          </h2>
+          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {relatedItems.map((p) => (
+              <li key={p.id} className="card p-4">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={p.image ?? ''}
+                  alt={p.title}
+                  loading="lazy"
+                  className="h-40 w-full rounded-xl object-contain bg-slate-900/60"
+                />
+                <div className="mt-3 line-clamp-2 font-medium">{p.title}</div>
+                <div className="text-sm opacity-80 mt-1">
+                  {money(p.price, p.currency) ?? '—'}
+                </div>
+                <Link href={`/product/${p.id}`} className="btn mt-3">View</Link>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
     </>
-  );
-}
-
-/* -------------------------- Related strip (SWR) -------------------------- */
-
-import useSWR from 'swr';
-
-type RelatedResp = {
-  items: Array<{ id: string; title: string; image?: string | null; price?: number | null; currency?: string | null }>;
-};
-
-function RelatedStrip({
-  url,
-  currentId,
-  sectionTitle,
-}: {
-  url: string;
-  currentId: string;
-  sectionTitle: string;
-}) {
-  const { data } = useSWR<RelatedResp>(url, (u) => fetch(u).then((r) => r.json()), {
-    revalidateOnFocus: false,
-  });
-
-  const items = (data?.items ?? []).filter((x) => x.id !== currentId);
-
-  if (!items.length) return null;
-
-  return (
-    <section className="mt-10 space-y-4">
-      <h2 className="text-lg font-semibold">{sectionTitle}</h2>
-      <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {items.slice(0, 6).map((p) => (
-          <li key={p.id} className="card p-4">
-            <div className="relative overflow-hidden rounded-xl">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={toHttps(p.image) ?? ''}
-                alt={p.title}
-                className="h-40 w-full rounded-xl bg-slate-900/60 object-contain"
-                loading="lazy"
-              />
-            </div>
-            <div className="mt-3 text-base font-medium line-clamp-2">{p.title}</div>
-            <div className="mt-1 text-sm opacity-70">
-              {money(p.price, p.currency) ?? ''}
-            </div>
-            <Link
-              href={`/product/${p.id}`}
-              onClick={() => {
-                if (typeof window !== 'undefined') {
-                  localStorage.setItem(
-                    'lastListPath',
-                    window.location.pathname + window.location.search,
-                  );
-                }
-              }}
-              className="btn mt-3"
-            >
-              View
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }
