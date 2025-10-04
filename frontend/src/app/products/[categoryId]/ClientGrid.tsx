@@ -23,7 +23,7 @@ const toHttps = (u?: string | null) => {
   }
 };
 
-type Category = { id: string; name: string; slug?: string | null };
+type Category = { id: string; title: string; slug?: string | null }; // <-- title (not name)
 type Product = {
   id: string;
   title: string;
@@ -62,7 +62,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   useEffect(() => setPage(1), [categoryId]);
 
-  // 1) Load all "books" categories to map slug -> UUID
+  // 1) Load “books” categories so we can resolve slug -> UUID
   const catsUrl = `${API}/categories/books`;
   const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(catsUrl, fetcher, {
     revalidateOnFocus: false,
@@ -70,9 +70,9 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   const matched = useMemo(() => {
     if (!cats) return undefined;
-    const bySlug = cats.find((c) => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
-    if (bySlug) return bySlug;
-    return cats.find((c) => c.name.toLowerCase() === categoryId.toLowerCase());
+    const slugHit = cats.find((c) => (c.slug ?? '').toLowerCase() === categoryId.toLowerCase());
+    if (slugHit) return slugHit;
+    return cats.find((c) => c.title.toLowerCase() === categoryId.toLowerCase()); // <-- title
   }, [cats, categoryId]);
 
   // 2) Fetch products for the resolved UUID
@@ -146,14 +146,14 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
                 </div>
                 <h3 className="mt-3 line-clamp-2 text-lg font-medium leading-snug">{p.title}</h3>
 
-                {/* UPDATED LINK: remember last list path */}
+                {/* Save the list location so the detail page can return here */}
                 <Link
                   href={`/product/${p.id}`}
                   onClick={() => {
                     if (typeof window !== 'undefined') {
                       localStorage.setItem(
                         'lastListPath',
-                        window.location.pathname + window.location.search
+                        window.location.pathname + window.location.search,
                       );
                     }
                   }}
