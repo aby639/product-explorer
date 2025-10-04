@@ -3,9 +3,9 @@
 import useSWR from 'swr';
 import Link from 'next/link';
 import { useEffect, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const fetcher = (u: string) => fetch(u, { cache: 'no-store' }).then((r) => r.json());
 
 type Product = {
   id: string;
@@ -13,237 +13,171 @@ type Product = {
   image?: string | null;
   price?: number | null;
   currency?: string | null;
-  sourceUrl?: string | null;
-  category?: { id: string; title: string; slug: string } | null;
+  sourceUrl?: string | null; // if present in your API; if not, we’ll build from specs
+  category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
     description?: string | null;
-    ratingAverage?: number | null; // 0..5 (or null)
     lastScrapedAt?: string | null;
-    specs?: any;
+    specs?: Record<string, any> | null;
+    ratingAverage?: number | null;
   } | null;
 };
 
-const fetcher = (url: string) =>
-  fetch(url, { cache: 'no-store' }).then((r) => {
-    if (!r.ok) throw new Error(`Failed to load (${r.status})`);
-    return r.json();
-  });
+type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
 
-const toHttps = (u?: string | null) => {
+const money = (v?: number | null, c?: string | null) =>
+  v != null && c
+    ? new Intl.NumberFormat(c === 'GBP' ? 'en-GB' : c === 'EUR' ? 'de-DE' : 'en-US', {
+        style: 'currency',
+        currency: c,
+      }).format(v)
+    : null;
+
+function toHttps(u?: string | null) {
   if (!u) return null;
   try {
-    const url = new URL(u);
+    const url = new URL(u, 'https://www.worldofbooks.com');
     if (url.protocol === 'http:') url.protocol = 'https:';
     return url.toString();
   } catch {
     return u;
   }
-};
-
-function BackButton() {
-  const router = useRouter();
-  return (
-    <button
-      className="btn"
-      onClick={() => {
-        if (typeof window !== 'undefined' && window.history.length > 1) {
-          router.back();
-        } else {
-          const lastList = localStorage.getItem('lastListPath') || '/categories/books';
-          router.push(lastList);
-        }
-      }}
-    >
-      ← Back
-    </button>
-  );
 }
 
-function Stars({ value }: { value: number }) {
-  const clamped = Math.max(0, Math.min(5, value));
-  const full = Math.floor(clamped);
-  const half = clamped - full >= 0.5;
-  const empty = 5 - full - (half ? 1 : 0);
-  return (
-    <div className="flex items-center gap-1 text-amber-400">
-      {Array.from({ length: full }).map((_, i) => (
-        <span key={`f${i}`} aria-hidden>★</span>
-      ))}
-      {half && <span aria-hidden>☆</span>}
-      {Array.from({ length: empty }).map((_, i) => (
-        <span key={`e${i}`} className="opacity-40" aria-hidden>★</span>
-      ))}
-    </div>
-  );
-}
+export default function ProductClient({ product, id }: { product: Product; id: string }) {
+  // BACK target from localStorage
+  const backHref =
+    typeof window !== 'undefined' && localStorage.getItem('lastListPath')
+      ? (localStorage.getItem('lastListPath') as string)
+      : '/';
 
-export default function ProductClient({ id, initial }: { id: string; initial: Product | null }) {
-  const { data: product, isLoading, mutate } = useSWR<Product | null>(`${API}/products/${id}`, fetcher, {
-    fallbackData: initial,
-  });
-
-  // record a “view” (optional persisted history)
+  // Fire-and-forget view history (optional)
   useEffect(() => {
-    if (!product?.id) return;
-    const session =
-      localStorage.getItem('pe_session') ||
-      (localStorage.setItem('pe_session', crypto.randomUUID()), localStorage.getItem('pe_session'));
-    fetch(`${API}/views`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        productId: product.id,
-        path: location.pathname + location.search,
-        session,
-      }),
-    }).catch(() => void 0);
-  }, [product?.id]);
+    try {
+      const sessionId =
+        localStorage.getItem('pe_session') || (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()));
+      localStorage.setItem('pe_session', sessionId);
+      const path = [window.location.pathname + window.location.search];
+      fetch(`${API}/views`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, path }),
+        keepalive: true,
+      }).catch(() => undefined);
+    } catch {}
+  }, []);
 
-  // fetch related (same category)
-  const { data: related } = useSWR<{ items: Product[] } | null>(
-    () => (product?.category?.slug ? `${API}/products?category=${encodeURIComponent(product.category.slug)}&limit=8` : null),
-    fetcher,
-    { fallbackData: null },
-  );
+  // related (by same category)
+  const relUrl = useMemo(() => {
+    const catId = product.category?.id;
+    if (!catId) return null;
+    const p = new URLSearchParams({ category: catId, page: '1', limit: '8' });
+    return `${API}/products?${p.toString()}`;
+  }, [product.category?.id]);
 
-  const money =
-    product?.price != null && product?.currency
-      ? new Intl.NumberFormat(
-          product.currency === 'GBP' ? 'en-GB' : product.currency === 'EUR' ? 'de-DE' : 'en-US',
-          { style: 'currency', currency: product.currency },
-        ).format(product.price)
-      : null;
+  const { data: rel } = useSWR<GridResponse>(relUrl, relUrl ? fetcher : null, { revalidateOnFocus: false });
 
-  const wobUrl = toHttps(product?.sourceUrl ?? product?.detail?.specs?.origin ?? null);
-  const rating = product?.detail?.ratingAverage ?? null;
+  const worldOfBooksUrl =
+    product.sourceUrl ??
+    (product.detail?.specs && typeof product.detail.specs['wobUrl'] === 'string'
+      ? (product.detail!.specs!['wobUrl'] as string)
+      : null);
 
-  if (isLoading && !product) {
-    return (
-      <main className="container-xl py-8 space-y-6">
-        <BackButton />
-        <div className="card p-6">Loading…</div>
-      </main>
-    );
-  }
-
-  if (!product) {
-    return (
-      <main className="container-xl py-8 space-y-6">
-        <BackButton />
-        <div className="card p-6">
-          <div className="text-lg font-semibold">Couldn’t load this product right now.</div>
-          <div className="mt-4 flex gap-3">
-            <button className="btn" onClick={() => mutate()}>
-              Try again
-            </button>
-            <Link href="/categories/books" className="btn btn-ghost">
-              Browse categories
-            </Link>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
-  // remove self from related list (and keep at most 8)
-  const relatedItems = useMemo(
-    () => (related?.items || []).filter((p) => p.id !== product.id).slice(0, 8),
-    [related?.items, product.id],
-  );
+  const safeImg = toHttps(product.image);
+  const priceText = money(product.price, product.currency);
 
   return (
-    <main className="container-xl py-8 space-y-8">
-      <BackButton />
+    <>
+      <Link href={backHref} className="btn">
+        ← Back
+      </Link>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={product.image ?? ''} alt={product.title} className="max-h-[420px] object-contain" />
+          <img src={safeImg ?? ''} alt={product.title} className="max-h-[420px] object-contain" />
         </div>
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
-
-          <div className="flex items-center gap-4">
-            {money ? <div className="text-xl font-semibold">{money}</div> : <div className="opacity-70">Price not available</div>}
-            {typeof rating === 'number' && rating > 0 && (
-              <div className="flex items-center gap-2">
-                <Stars value={rating} />
-                <span className="text-sm opacity-80">{rating.toFixed(1)} / 5</span>
-              </div>
-            )}
-          </div>
+          {priceText ? <div className="text-xl font-semibold">{priceText}</div> : <div className="opacity-70">—</div>}
 
           <div className="flex gap-3">
-            {wobUrl && (
-              <a href={wobUrl} target="_blank" rel="noreferrer" className="btn btn-ghost">
+            {worldOfBooksUrl && (
+              <a
+                href={toHttps(worldOfBooksUrl) ?? '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-ghost"
+                aria-label="View this book on World of Books"
+              >
                 View on World of Books
               </a>
             )}
-            <button
-              className="btn btn-ghost"
-              onClick={async () => {
-                await fetch(`${API}/products/${product.id}?refresh=true`, { cache: 'no-store' }).catch(() => void 0);
-                mutate(); // re-fetch after server completes (cooldown prevents hammering)
-              }}
-            >
+
+            <Link href={`/product/${id}?refresh=true`} className="btn btn-ghost">
               Force refresh
-            </button>
+            </Link>
           </div>
 
           {product?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
               <div className="whitespace-pre-line leading-relaxed">{product.detail.description}</div>
-              {product.detail.lastScrapedAt && (
-                <div className="mt-2 text-xs opacity-60">
-                  Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}
-                </div>
-              )}
+
+              <div className="mt-2 text-xs opacity-60 flex gap-4 items-center">
+                {product.detail.ratingAverage != null && (
+                  <span>Rating: {Number(product.detail.ratingAverage).toFixed(1)} / 5</span>
+                )}
+                {product.detail.lastScrapedAt && (
+                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+                )}
+              </div>
             </div>
           )}
         </div>
       </section>
 
-      {relatedItems.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold">
-            Related in {product.category?.title || 'this category'}
+      {rel?.items?.length ? (
+        <section className="mt-8">
+          <h2 className="mb-4 text-lg font-semibold">
+            Related in {product.category?.title ?? 'this category'}
           </h2>
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {relatedItems.map((p) => {
-              const price =
-                p.price != null && p.currency
-                  ? new Intl.NumberFormat(p.currency === 'GBP' ? 'en-GB' : 'en-US', {
-                      style: 'currency',
-                      currency: p.currency,
-                    }).format(p.price)
-                  : null;
-
-              return (
-                <div key={p.id} className="card p-4 space-y-3">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.image ?? ''} alt={p.title} className="h-40 object-contain mx-auto" />
-                  <div className="font-medium line-clamp-2">{p.title}</div>
-                  {price && <div className="text-sm opacity-80">{price}</div>}
+          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {rel.items
+              .filter((p) => p.id !== id)
+              .slice(0, 6)
+              .map((p) => (
+                <li key={p.id} className="card p-4">
+                  <div className="relative overflow-hidden rounded-xl">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={toHttps(p.image) ?? ''}
+                      alt={p.title}
+                      className="h-40 w-full rounded-xl bg-slate-900/60 object-contain"
+                    />
+                  </div>
+                  <h3 className="mt-3 line-clamp-2 font-medium">{p.title}</h3>
+                  <div className="opacity-70 text-sm">{money(p.price, p.currency) ?? '—'}</div>
                   <Link
                     href={`/product/${p.id}`}
-                    className="btn btn-ghost"
+                    className="btn mt-3"
                     onClick={() => {
                       if (typeof window !== 'undefined') {
-                        localStorage.setItem('lastListPath', window.location.pathname + window.location.search);
+                        localStorage.setItem(
+                          'lastListPath',
+                          window.location.pathname.replace(`/product/${id}`, `/products/${product.category?.slug ?? ''}`),
+                        );
                       }
                     }}
                   >
                     View
                   </Link>
-                </div>
-              );
-            })}
-          </div>
+                </li>
+              ))}
+          </ul>
         </section>
-      )}
-    </main>
+      ) : null}
+    </>
   );
 }
