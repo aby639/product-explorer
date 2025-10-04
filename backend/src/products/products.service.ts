@@ -19,7 +19,6 @@ export class ProductsService {
     private readonly scraper: ScraperService,
   ) {}
 
-  /** Accepts category as UUID or human slug/title (“fiction”, “non-fiction”). */
   async list(q: ListProductsQueryDto) {
     const page = Math.max(1, Number(q.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(q.limit ?? 12)));
@@ -30,14 +29,11 @@ export class ProductsService {
       if (uuidV4Rx.test(q.category)) {
         categoryIds = [q.category];
       } else {
-        // strict matches first
         const cats = await this.categories.find({
           where: [{ slug: q.category }, { title: ILike(q.category) }, { slug: q.category.toLowerCase() }],
           take: 10,
         });
         categoryIds = cats.map((c) => c.id);
-
-        // then loose title contains
         if (!categoryIds.length) {
           const candidates = await this.categories.find({
             where: [{ title: ILike(`%${q.category}%`) }],
@@ -67,7 +63,6 @@ export class ProductsService {
     return { items, total, page, limit };
   }
 
-  /** Get product + detail; optionally refresh before returning. Never throw on scraping. */
   async getOneSafe(id: string, opts?: { refresh?: boolean }) {
     const exists = await this.products.findOne({
       where: { id },
@@ -78,9 +73,7 @@ export class ProductsService {
     if (opts?.refresh) {
       try {
         await this.scraper.refreshProduct(id);
-      } catch {
-        // ignore scrape errors
-      }
+      } catch {}
     }
 
     const withDetail = await this.products.findOne({
@@ -92,7 +85,7 @@ export class ProductsService {
         image: true,
         price: true,
         currency: true,
-        sourceUrl: true, // expose origin for “View on WOB”
+        sourceUrl: true, // for the external link
         category: { id: true, title: true, slug: true },
         detail: {
           id: true,
