@@ -24,7 +24,13 @@ const toHttps = (u?: string | null) => {
 };
 
 type Category = { id: string; name: string; slug?: string | null };
-type Product = { id: string; title: string; image?: string | null; price?: number | null; currency?: string | null };
+type Product = {
+  id: string;
+  title: string;
+  image?: string | null;
+  price?: number | null;
+  currency?: string | null;
+};
 type GridResponse = { items: Product[]; total: number; page: number; limit: number };
 
 function money(value?: number | null, currency?: string | null) {
@@ -56,7 +62,7 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
 
   useEffect(() => setPage(1), [categoryId]);
 
-  // all book categories to resolve slug/name → UUID
+  // 1) Load all "books" categories to map slug -> UUID
   const catsUrl = `${API}/categories/books`;
   const { data: cats, error: catsErr, isLoading: catsLoading } = useSWR<Category[]>(catsUrl, fetcher, {
     revalidateOnFocus: false,
@@ -69,14 +75,22 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
     return cats.find((c) => c.name.toLowerCase() === categoryId.toLowerCase());
   }, [cats, categoryId]);
 
-  // products in that category
+  // 2) Fetch products for the resolved UUID
   const productsUrl = useMemo(() => {
     if (!matched?.id) return null;
-    const params = new URLSearchParams({ category: matched.id, page: String(page), limit: String(defaultLimit) });
+    const params = new URLSearchParams({
+      category: matched.id,
+      page: String(page),
+      limit: String(defaultLimit),
+    });
     return `${API}/products?${params.toString()}`;
   }, [matched?.id, page]);
 
-  const { data, error: prodErr, isLoading: prodLoading } = useSWR<GridResponse>(productsUrl, fetcher, {
+  const {
+    data,
+    error: prodErr,
+    isLoading: prodLoading,
+  } = useSWR<GridResponse>(productsUrl, fetcher, {
     revalidateOnFocus: false,
     keepPreviousData: true,
   });
@@ -131,11 +145,16 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
                   </div>
                 </div>
                 <h3 className="mt-3 line-clamp-2 text-lg font-medium leading-snug">{p.title}</h3>
+
+                {/* UPDATED LINK: remember last list path */}
                 <Link
                   href={`/product/${p.id}`}
                   onClick={() => {
                     if (typeof window !== 'undefined') {
-                      localStorage.setItem('lastListPath', window.location.pathname + window.location.search);
+                      localStorage.setItem(
+                        'lastListPath',
+                        window.location.pathname + window.location.search
+                      );
                     }
                   }}
                   className="btn mt-4"
@@ -155,13 +174,21 @@ export default function ClientGrid({ categoryId }: { categoryId: string }) {
       )}
 
       <div className="flex items-center gap-3 pt-1">
-        <button className="btn disabled:opacity-50" disabled={page <= 1 || isLoading} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+        <button
+          className="btn disabled:opacity-50"
+          disabled={page <= 1 || isLoading}
+          onClick={() => setPage((p) => Math.max(1, p - 1))}
+        >
           Prev
         </button>
         <span className="rounded-full border border-white/15 px-4 py-2 text-sm">
           {Math.min(page, pages)} / {pages}
         </span>
-        <button className="btn disabled:opacity-50" disabled={page >= pages || isLoading} onClick={() => setPage((p) => Math.min(pages, p + 1))}>
+        <button
+          className="btn disabled:opacity-50"
+          disabled={page >= pages || isLoading}
+          onClick={() => setPage((p) => Math.min(pages, p + 1))}
+        >
           Next
         </button>
         <div className="ml-auto text-xs opacity-70">Total: {total}</div>
