@@ -16,10 +16,10 @@ export class ListProductsQueryDto {
   limit?: number = 12;
 
   /**
-   * Can be:
-   * - a Category UUID
-   * - a slug (e.g. "fiction", "non-fiction")
-   * - a case-insensitive category name ("Fiction")
+   * Accepts:
+   * - Category UUID (v4)
+   * - slug ("fiction", "non-fiction")
+   * - case-insensitive title ("Fiction")
    */
   @IsOptional()
   @IsString()
