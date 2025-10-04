@@ -5,11 +5,10 @@ export class ViewHistory {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  // anonymous/browser session id (from cookie/localStorage the client sends)
   @Column('text')
   sessionId!: string;
 
-  // e.g. ["/categories/books","/products/fiction","/product/abc-uuid"]
+  // e.g. ["/", "/categories/books", "/products/fiction"]
   @Column('jsonb')
   pathJson!: string[];
 
