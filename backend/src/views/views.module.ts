@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ViewHistory } from '../entities/view-history.entity';
-import { ViewsService } from './views.service';
+import { ViewHistory } from '../entities';
 import { ViewsController } from './views.controller';
+import { ViewsService } from './views.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([ViewHistory])],
-  providers: [ViewsService],
   controllers: [ViewsController],
+  providers: [ViewsService],
 })
 export class ViewsModule {}
