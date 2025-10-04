@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { ViewHistory } from '../entities';
+import { ViewHistory } from '../entities/view-history.entity';
 import { CreateViewDto } from './dto/create-view.dto';
 
 @Injectable()
@@ -11,10 +11,10 @@ export class ViewsService {
     private readonly repo: Repository<ViewHistory>,
   ) {}
 
-  async create(dto: CreateViewDto) {
+  async create(body: CreateViewDto) {
     const row = this.repo.create({
-      sessionId: dto.sessionId,
-      pathJson: dto.path,
+      sessionId: body.sessionId,
+      pathJson: body.pathJson.slice(0, 20),
     });
     return this.repo.save(row);
   }
