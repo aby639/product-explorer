@@ -191,7 +191,7 @@ async function extractPriceAndCurrency(
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
 
-  // ✅ define once and reuse
+  // define once and reuse
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
@@ -542,9 +542,7 @@ export class ScraperService {
     if (changedProduct) await this.products.save(product);
 
     // Get or create detail
-    let detail = await this.details.findOne({
-      where: { product: { id: product.id } },
-    });
+    let detail = await this.details.findOne({ where: { product: { id: product.id } } });
     if (!detail) {
       detail = this.details.create({ product });
     }
