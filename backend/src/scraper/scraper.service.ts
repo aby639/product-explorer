@@ -119,11 +119,7 @@ async function extractImage(page: PWPage): Promise<string | null> {
     (await page
       .evaluate(() => {
         const absolutize = (u: string) => {
-          try {
-            return new URL(u, location.href).toString();
-          } catch {
-            return null;
-          }
+          try { return new URL(u, location.href).toString(); } catch { return null; }
         };
         const isLogo = (u: string, alt = '') =>
           !u ||
@@ -131,12 +127,14 @@ async function extractImage(page: PWPage): Promise<string | null> {
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
+        // OG/Twitter first
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
+        // JSON-LD Product/Book image
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -153,6 +151,7 @@ async function extractImage(page: PWPage): Promise<string | null> {
           } catch {}
         }
 
+        // Best portrait IMG
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
@@ -179,185 +178,47 @@ async function extractImage(page: PWPage): Promise<string | null> {
   return raw;
 }
 
-/* -------------------- Price extraction (unchanged) -------------------- */
-
-async function extractPriceAndCurrency(
-  page: PWPage,
-): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
-  const probes: string[] = [];
-  const host = new URL(page.url()).host;
-  const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
-
-  const unavailable = await page
-    .evaluate(() => {
-      const scope = document.querySelector('main') || document.body;
-      const txt = (scope?.textContent || '').toLowerCase();
-      return /currently unavailable|out of stock/i.test(txt);
-    })
-    .catch(() => false);
-
-  if (unavailable) {
-    probes.push('flag:unavailable');
-    return { price: null, currency: null, unavailable: true, probes };
-  }
-
-  const fromWobConditions = await page
-    .evaluate(() => {
-      const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
-      const container =
-        document.querySelector('[data-testid="product-conditions"]') ||
-        document.querySelector('.product-condition__options') ||
-        document.querySelector('main') ||
-        document.body;
-
-      const buttons = Array.from(
-        container.querySelectorAll<HTMLElement>(
-          'button, [role="button"], .product-condition__option, [data-testid*="condition"]',
-        ),
-      );
-
-      const parseMoney = (s: string) => {
-        const m = s.replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-        return m ? Number(m[1]) : null;
-      };
-
-      const items = buttons
-        .map((btn) => {
-          const text = grab(btn);
-          const v = parseMoney(text);
-          const selected =
-            btn.getAttribute('aria-pressed') === 'true' ||
-            btn.getAttribute('aria-checked') === 'true' ||
-            btn.classList.contains('is-selected') ||
-            btn.classList.contains('selected');
-          const disabled =
-            btn.getAttribute('aria-disabled') === 'true' ||
-            /out of stock|unavailable/i.test(text) ||
-            btn.hasAttribute('disabled');
-          return { v, selected, disabled };
-        })
-        .filter((x) => (x.v ?? null) !== null) as Array<{ v: number; selected: boolean; disabled: boolean }>;
-
-      if (!items.length) return null;
-
-      const sel = items.find((x) => x.selected && !x.disabled);
-      if (sel) return { price: sel.v, currency: 'GBP' };
-
-      const inStock = items.filter((x) => !x.disabled);
-      inStock.sort((a, b) => a.v - b.v);
-      if (inStock[0]) return { price: inStock[0].v, currency: 'GBP' };
-
-      return null;
-    })
-    .catch(() => null);
-
-  if (fromWobConditions && Number.isFinite(fromWobConditions.price)) {
-    probes.push('price:wob-conditions');
-    return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
-  }
-
-  const fromLd = await page
-    .evaluate(() => {
-      const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
-      try {
-        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
-        const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
-        const pushOffer = (o: any) => out.offers.push(o);
-
-        for (const s of scripts) {
-          const data = JSON.parse(s.textContent || 'null');
-          const list = asArray(data);
-          for (const item of list) {
-            const t = asArray(item?.['@type']);
-            if (!t.some((x: string) => /product|book/i.test(x))) continue;
-            asArray(item.offers).forEach(pushOffer);
-          }
+/** JSON-LD & HTML fallbacks for rating and review count */
+async function extractRating(page: PWPage): Promise<{ value: number | null; count: number | null }> {
+  // Try JSON-LD first
+  const ld = await page.evaluate(() => {
+    const result = { ratingValue: null as number | null, ratingCount: null as number | null };
+    try {
+      const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+      const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
+      for (const s of scripts) {
+        const data = JSON.parse(s.textContent || 'null');
+        for (const item of asArray(data)) {
+          const types = asArray(item?.['@type']);
+          if (!types.some((t: string) => /product|book/i.test(t))) continue;
+          const agg = item?.aggregateRating ?? item?.AggregateRating ?? null;
+          if (!agg) continue;
+          const val = Number(String(agg?.ratingValue ?? agg?.rating ?? '').replace(/[^\d.]/g, ''));
+          const cnt = Number(String(agg?.reviewCount ?? agg?.ratingCount ?? '').replace(/[^\d]/g, ''));
+          if (Number.isFinite(val)) result.ratingValue = val;
+          if (Number.isFinite(cnt)) result.ratingCount = cnt;
         }
-
-        let best: number | null = null;
-        let cur: string | null = null;
-
-        for (const o of out.offers) {
-          const avail = String(o?.availability || '').toLowerCase();
-          if (avail.includes('outofstock')) continue;
-          const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
-          const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
-          const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
-          if (p != null && p > 0 && p < 2000 && (best == null || p < best)) {
-            best = p;
-            cur = c || cur;
-          }
-        }
-
-        out.price = best;
-        out.currency = cur;
-      } catch {}
-      return out;
-    })
-    .catch(() => ({ price: null, currency: null } as any));
-
-  if (fromLd.price != null) {
-    const host = new URL(page.url()).host;
-    const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
-    if (!isWOB || fromLd.currency === 'GBP') {
-      probes.push('price:ld-json');
-      return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
-    } else {
-      probes.push('price:ld-json-non-gbp-ignored');
-    }
-  }
-
-  const fromMicro = await page
-    .evaluate(() => {
-      const found: Array<{ v: number; c: string | null }> = [];
-
-      document.querySelectorAll('[itemprop="price"]').forEach((el) => {
-        const v = Number(
-          (el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''),
-        );
-        const c = /£/.test(el.getAttribute('content') || '') ? 'GBP' : null;
-        if (Number.isFinite(v)) found.push({ v, c });
-      });
-
-      const metaAmt =
-        document.querySelector<HTMLMetaElement>('meta[property="product:price:amount"]') ||
-        document.querySelector<HTMLMetaElement>('meta[name="product:price:amount"]');
-      const metaCur =
-        document.querySelector<HTMLMetaElement>('meta[property="product:price:currency"]') ||
-        document.querySelector<HTMLMetaElement>('meta[name="product:price:currency"]');
-      if (metaAmt) {
-        const v = Number((metaAmt.content || '').replace(/[^\d.]/g, ''));
-        if (Number.isFinite(v)) found.push({ v, c: (metaCur?.content || null) as any });
       }
+    } catch {}
+    return result;
+  }).catch(() => ({ ratingValue: null, ratingCount: null }));
 
-      return found;
-    })
-    .catch(() => [] as Array<{ v: number; c: string | null }>);
-
-  if (fromMicro.length) {
-    const sane = fromMicro.filter((x) => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
-    sane.sort((a, b) => a.v - b.v);
-    const pick = sane[0];
-    const host = new URL(page.url()).host;
-    const isWOB2 = /(^|\.)worldofbooks\.com$/i.test(host);
-    if (pick && (!isWOB2 || pick.c === 'GBP')) {
-      probes.push('price:micro/meta');
-      return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
-    }
-    probes.push('price:micro-non-gbp-ignored');
+  if (ld.ratingValue != null || ld.ratingCount != null) {
+    return { value: ld.ratingValue, count: ld.ratingCount };
   }
 
-  const html = await page.content().catch(() => '');
-  if (html) {
-    const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
-    if (m) {
-      probes.push('price:html-fallback');
-      return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes };
-    }
-  }
+  // Microdata minimal fallback
+  const html = await page.evaluate(() => {
+    const vEl = document.querySelector('[itemprop="ratingValue"]');
+    const cEl =
+      document.querySelector('[itemprop="reviewCount"]') ||
+      document.querySelector('[itemprop="ratingCount"]');
+    const v = vEl ? Number((vEl.getAttribute('content') || vEl.textContent || '').replace(/[^\d.]/g, '')) : null;
+    const c = cEl ? Number((cEl.getAttribute('content') || cEl.textContent || '').replace(/[^\d]/g, '')) : null;
+    return { v: Number.isFinite(v as number) ? (v as number) : null, c: Number.isFinite(c as number) ? (c as number) : null };
+  }).catch(() => ({ v: null, c: null }));
 
-  probes.push('price:none');
-  return { price: null, currency: null, unavailable: false, probes };
+  return { value: html.v, count: html.c };
 }
 
 /* -------------------------------- service ------------------------------- */
@@ -403,7 +264,7 @@ export class ScraperService {
     let priceNum: number | null = null;
     let currencyDetected: string | null = null;
     let ratingAverage: number | null = null;
-    let reviewCount: number | null = null;
+    let ratingCount: number | null = null;
     let status: number | null = null;
     let unavailable = false;
     let priceProbes: string[] = [];
@@ -465,51 +326,10 @@ export class ScraperService {
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
-      // rating (visible DOM best effort)
-      const ratingText =
-        (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
-        (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
-        null;
-      ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
-
-      // review count (visible DOM best effort)
-      const reviewText =
-        (await page.locator('[itemprop="reviewCount"]').first().textContent().catch(() => null)) ??
-        (await page.locator('[data-testid="review-count"], .review-count, .ratings-count').first().textContent().catch(() => null)) ??
-        null;
-      if (reviewText) {
-        const n = Number(String(reviewText).replace(/[^\d]/g, ''));
-        if (Number.isFinite(n)) reviewCount = n;
-      }
-
-      // JSON-LD aggregateRating fallback / enhancement
-      const ld = await page.evaluate(() => {
-        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
-        const out: { ratingValue?: number; reviewCount?: number } = {};
-        const toArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
-        for (const s of scripts) {
-          try {
-            const data = JSON.parse(s.textContent || 'null');
-            const list = toArray(data);
-            for (const item of list) {
-              const t = toArray(item?.['@type']);
-              if (t.some((x: string) => /product|book/i.test(x))) {
-                const ar = item.aggregateRating ?? item?.review?.aggregateRating ?? null;
-                if (ar) {
-                  const val = Number(String(ar.ratingValue ?? ar.rating ?? '').replace(/[^\d.]/g, ''));
-                  const cnt = Number(String(ar.reviewCount ?? ar.ratingCount ?? '').replace(/[^\d]/g, ''));
-                  if (Number.isFinite(val) && val > 0) out.ratingValue = val;
-                  if (Number.isFinite(cnt) && cnt >= 0) out.reviewCount = cnt;
-                }
-              }
-            }
-          } catch {}
-        }
-        return out;
-      });
-
-      if (ld?.ratingValue && !ratingAverage) ratingAverage = ld.ratingValue;
-      if (typeof ld?.reviewCount === 'number' && reviewCount == null) reviewCount = ld.reviewCount;
+      // rating (JSON-LD + fallbacks)
+      const r = await extractRating(page);
+      ratingAverage = Number.isFinite(r.value as number) ? (r.value as number) : null;
+      ratingCount = Number.isFinite(r.count as number) ? (r.count as number) : null;
     } catch (err) {
       scrapeError = err;
       this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -518,7 +338,9 @@ export class ScraperService {
     }
 
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} reviews=${reviewCount ?? 'na'} probes=${priceProbes.join(',')}`,
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} ` +
+      `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
+      `reviews=${ratingCount ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -568,24 +390,22 @@ export class ScraperService {
 
     // Get or create detail
     let detail = await this.details.findOne({ where: { product: { id: product.id } } });
-    if (!detail) {
-      detail = this.details.create({ product });
-    }
+    if (!detail) detail = this.details.create({ product });
 
-    const scrapedAt = new Date(); // unified timestamp used twice
+    const scrapedAt = new Date();
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
-    detail.lastScrapedAt = scrapedAt;
     detail.specs = {
       ...(detail.specs || {}),
       lastStatus: status,
       unavailable,
       priceProbes,
-      reviewCount: typeof reviewCount === 'number' ? reviewCount : undefined,
       lastScrapedAtISO: scrapedAt.toISOString(),
       sourceUrl: product.sourceUrl ?? null,
+      reviewsCount: ratingCount ?? null, // <— keep review count in the JSON bag
     };
+    detail.lastScrapedAt = scrapedAt;
 
     const saved = await this.details.save(detail);
     (saved as any).product = undefined;
