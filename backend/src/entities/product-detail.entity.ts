@@ -28,12 +28,13 @@ export class ProductDetail {
   @Column({ type: 'jsonb', nullable: true, default: () => `'{}'::jsonb` })
   specs?: Record<string, any> | null;
 
-  @Column({ type: 'timestamptz', nullable: true })
+  // 👇 explicit column name + timestamptz so it persists/reads reliably
+  @Column({ name: 'last_scraped_at', type: 'timestamptz', nullable: true })
   lastScrapedAt?: Date | null;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 }
