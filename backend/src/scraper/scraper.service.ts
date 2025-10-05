@@ -208,7 +208,7 @@ async function extractPriceAndCurrency(
     return { price: null, currency: null, unavailable: true, probes };
   }
 
-  // WOB conditions UI (preferred)
+  // WOB conditions UI
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -264,7 +264,7 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
   }
 
-  // JSON-LD product offers (ignore non-GBP on WOB)
+  // JSON-LD product offers
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
@@ -353,7 +353,7 @@ async function extractPriceAndCurrency(
     probes.push('price:micro-non-gbp-ignored');
   }
 
-  // Last resort: look for £xx.xx in HTML
+  // Last resort from HTML
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
@@ -485,9 +485,7 @@ export class ScraperService {
     }
 
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${
-        priceNum ?? 'na'
-      } currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -524,9 +522,7 @@ export class ScraperService {
     } else {
       // Clear price for unavailable or non-GBP (on WOB)
       if (product.price !== null) {
-        this.log.log(
-          `Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`,
-        );
+        this.log.log(`Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`);
         product.price = null;
         changedProduct = true;
       }
@@ -544,8 +540,7 @@ export class ScraperService {
       detail = this.details.create({ product });
     }
 
-    // timestamp now (used in both column and specs for UI fallback)
-    const now = new Date();
+    const scrapedAt = new Date(); // <<< unified timestamp used twice
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
@@ -554,10 +549,11 @@ export class ScraperService {
       lastStatus: status,
       unavailable,
       priceProbes,
+      // mirror the timestamp & keep a copy of the canonical source URL
+      lastScrapedAtISO: scrapedAt.toISOString(),
       sourceUrl: product.sourceUrl ?? null,
-      lastScrapedAtISO: now.toISOString(), // 👈 fallback for UI
     };
-    detail.lastScrapedAt = now; // 👈 real column
+    detail.lastScrapedAt = scrapedAt;
 
     const saved = await this.details.save(detail);
     (saved as any).product = undefined;
