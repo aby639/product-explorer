@@ -1,8 +1,8 @@
+// frontend/src/app/product/[id]/ProductClient.tsx
 'use client';
 
 import Link from 'next/link';
 import useSWR from 'swr';
-import { useMemo } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -24,19 +24,15 @@ type Product = {
 
 type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
 
-const fetcher = (url: string) =>
-  fetch(url, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : Promise.reject(r)));
+const fetcher = (url: string) => fetch(url, { cache: 'no-store' }).then(r => r.ok ? r.json() : Promise.reject(r));
 
 const money = (value?: number | null, currency?: string | null) =>
   value != null && currency
-    ? new Intl.NumberFormat(currency === 'GBP' ? 'en-GB' : 'en-US', {
-        style: 'currency',
-        currency,
-      }).format(value)
+    ? new Intl.NumberFormat(currency === 'GBP' ? 'en-GB' : 'en-US', { style: 'currency', currency }).format(value)
     : null;
 
 export default function ProductClient({ product }: { product: Product }) {
-  // one & only Back button — prefers the last list we saved, else history.back(), else home
+  // One back button: prefer saved last list path, else history.back, else home
   const handleBack = () => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
     if (saved) window.location.href = saved;
@@ -44,40 +40,18 @@ export default function ProductClient({ product }: { product: Product }) {
     else window.location.href = '/';
   };
 
-  /** Live product data (fallback to server-provided `product`) */
-  const productUrl = useMemo(() => {
-    const u = new URL(`${API}/products/${product.id}`);
-    // tiny cache-buster based on time to be safe against proxies
-    u.searchParams.set('k', String(Math.floor(Date.now() / 30000)));
-    return u.toString();
-  }, [product.id]);
+  const price = money(product.price, product.currency);
 
-  const { data, mutate, isLoading } = useSWR<Product>(productUrl, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: true,
-    fallbackData: product,
-  });
-
-  const current = data ?? product;
-
-  const price = money(current.price, current.currency);
-
-  // try to find the canonical source URL from several places but **typed**
+  // Typed source URL fallbacks
   const sourceUrl: string | undefined =
-    current.detail?.specs?.sourceUrl ??
-    current.detail?.specs?.source_url ??
-    current.sourceUrl ??
-    (current.detail?.specs?.url as string | undefined);
+    product.detail?.specs?.sourceUrl ??
+    product.detail?.specs?.source_url ??
+    product.sourceUrl ??
+    (product.detail?.specs?.url as string | undefined);
 
-  /** Force refresh: POST to backend then re-fetch the product (no cache) */
-  const onForceRefresh = async () => {
-    await fetch(`${API}/products/${current.id}/refresh`, { method: 'POST' });
-    await mutate(); // revalidate — will show updated lastScrapedAt immediately
-  };
-
-  // related products from the same category (exclude current)
-  const relatedUrl = current.category?.id
-    ? `${API}/products?category=${encodeURIComponent(current.category.id)}&limit=6`
+  // Related from same category (exclude current)
+  const relatedUrl = product.category?.id
+    ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
     : null;
 
   const { data: related } = useSWR<GridResponse>(relatedUrl ?? null, fetcher, {
@@ -85,26 +59,24 @@ export default function ProductClient({ product }: { product: Product }) {
     keepPreviousData: true,
   });
 
-  const relatedItems = (related?.items ?? []).filter((p) => p.id !== current.id).slice(0, 6);
+  const relatedItems = (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
 
   return (
     <>
-      <button onClick={handleBack} className="btn">
-        ← Back
-      </button>
+      <button onClick={handleBack} className="btn">← Back</button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={current.image ?? ''}
-            alt={current.title}
+            src={product.image ?? ''}
+            alt={product.title}
             className="max-h-[420px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
-          <h1 className="section-title">{current.title}</h1>
+          <h1 className="section-title">{product.title}</h1>
           {price ? (
             <div className="text-xl font-semibold">{price}</div>
           ) : (
@@ -117,26 +89,26 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            <button onClick={onForceRefresh} className="btn btn-ghost" aria-busy={isLoading}>
+            {/* IMPORTANT: use query param so backend triggers scrape */}
+            <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
-            </button>
+            </Link>
           </div>
 
-          {current?.detail?.description && (
+          {product?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
               <div className="whitespace-pre-line leading-relaxed">
-                {current.detail.description}
+                {product.detail.description}
               </div>
               <div className="mt-2 text-xs opacity-60 flex gap-3">
-                {current.detail.lastScrapedAt && (
-                  <span>
-                    Last scraped:{' '}
-                    {new Date(current.detail.lastScrapedAt).toLocaleString()}
-                  </span>
+                {product.detail.lastScrapedAt ? (
+                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+                ) : (
+                  <span>Last scraped: —</span>
                 )}
-                {typeof current.detail.ratingAverage === 'number' && (
-                  <span>Rating: {current.detail.ratingAverage.toFixed(1)} / 5</span>
+                {typeof product.detail.ratingAverage === 'number' && (
+                  <span>Rating: {product.detail.ratingAverage.toFixed(1)} / 5</span>
                 )}
               </div>
             </div>
@@ -147,7 +119,7 @@ export default function ProductClient({ product }: { product: Product }) {
       {relatedItems.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">
-            Related in {current.category?.title ?? 'this category'}
+            Related in {product.category?.title ?? 'this category'}
           </h2>
           <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {relatedItems.map((p) => (
