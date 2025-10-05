@@ -40,7 +40,6 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
-// decode minimal HTML entities
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -132,14 +131,12 @@ async function extractImage(page: PWPage): Promise<string | null> {
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-        // OG/Twitter first
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
-        // JSON-LD Product/Book image
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -156,7 +153,6 @@ async function extractImage(page: PWPage): Promise<string | null> {
           } catch {}
         }
 
-        // Best portrait IMG on page
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
@@ -183,18 +179,15 @@ async function extractImage(page: PWPage): Promise<string | null> {
   return raw;
 }
 
-/**
- * Extract price & currency with World of Books quirks handled.
- */
+/* -------------------- Price extraction (unchanged) -------------------- */
+
 async function extractPriceAndCurrency(
   page: PWPage,
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
-
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
-  // Unavailable?
   const unavailable = await page
     .evaluate(() => {
       const scope = document.querySelector('main') || document.body;
@@ -208,7 +201,6 @@ async function extractPriceAndCurrency(
     return { price: null, currency: null, unavailable: true, probes };
   }
 
-  // WOB conditions UI
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -264,7 +256,6 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
   }
 
-  // JSON-LD product offers
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
@@ -306,6 +297,8 @@ async function extractPriceAndCurrency(
     .catch(() => ({ price: null, currency: null } as any));
 
   if (fromLd.price != null) {
+    const host = new URL(page.url()).host;
+    const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
     if (!isWOB || fromLd.currency === 'GBP') {
       probes.push('price:ld-json');
       return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
@@ -314,7 +307,6 @@ async function extractPriceAndCurrency(
     }
   }
 
-  // Microdata/meta
   const fromMicro = await page
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = [];
@@ -346,14 +338,15 @@ async function extractPriceAndCurrency(
     const sane = fromMicro.filter((x) => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
     sane.sort((a, b) => a.v - b.v);
     const pick = sane[0];
-    if (pick && (!isWOB || pick.c === 'GBP')) {
+    const host = new URL(page.url()).host;
+    const isWOB2 = /(^|\.)worldofbooks\.com$/i.test(host);
+    if (pick && (!isWOB2 || pick.c === 'GBP')) {
       probes.push('price:micro/meta');
       return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
     }
     probes.push('price:micro-non-gbp-ignored');
   }
 
-  // Last resort from HTML
   const html = await page.content().catch(() => '');
   if (html) {
     const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
@@ -410,6 +403,7 @@ export class ScraperService {
     let priceNum: number | null = null;
     let currencyDetected: string | null = null;
     let ratingAverage: number | null = null;
+    let reviewCount: number | null = null;
     let status: number | null = null;
     let unavailable = false;
     let priceProbes: string[] = [];
@@ -471,12 +465,51 @@ export class ScraperService {
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
-      // rating (best effort)
+      // rating (visible DOM best effort)
       const ratingText =
         (await page.locator('[itemprop="ratingValue"]').first().textContent().catch(() => null)) ??
         (await page.locator('.rating__value').first().textContent().catch(() => null)) ??
         null;
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
+
+      // review count (visible DOM best effort)
+      const reviewText =
+        (await page.locator('[itemprop="reviewCount"]').first().textContent().catch(() => null)) ??
+        (await page.locator('[data-testid="review-count"], .review-count, .ratings-count').first().textContent().catch(() => null)) ??
+        null;
+      if (reviewText) {
+        const n = Number(String(reviewText).replace(/[^\d]/g, ''));
+        if (Number.isFinite(n)) reviewCount = n;
+      }
+
+      // JSON-LD aggregateRating fallback / enhancement
+      const ld = await page.evaluate(() => {
+        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+        const out: { ratingValue?: number; reviewCount?: number } = {};
+        const toArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
+        for (const s of scripts) {
+          try {
+            const data = JSON.parse(s.textContent || 'null');
+            const list = toArray(data);
+            for (const item of list) {
+              const t = toArray(item?.['@type']);
+              if (t.some((x: string) => /product|book/i.test(x))) {
+                const ar = item.aggregateRating ?? item?.review?.aggregateRating ?? null;
+                if (ar) {
+                  const val = Number(String(ar.ratingValue ?? ar.rating ?? '').replace(/[^\d.]/g, ''));
+                  const cnt = Number(String(ar.reviewCount ?? ar.ratingCount ?? '').replace(/[^\d]/g, ''));
+                  if (Number.isFinite(val) && val > 0) out.ratingValue = val;
+                  if (Number.isFinite(cnt) && cnt >= 0) out.reviewCount = cnt;
+                }
+              }
+            }
+          } catch {}
+        }
+        return out;
+      });
+
+      if (ld?.ratingValue && !ratingAverage) ratingAverage = ld.ratingValue;
+      if (typeof ld?.reviewCount === 'number' && reviewCount == null) reviewCount = ld.reviewCount;
     } catch (err) {
       scrapeError = err;
       this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -485,7 +518,7 @@ export class ScraperService {
     }
 
     this.log.log(
-      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} probes=${priceProbes.join(',')}`,
+      `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} reviews=${reviewCount ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -520,7 +553,6 @@ export class ScraperService {
         changedProduct = true;
       }
     } else {
-      // Clear price for unavailable or non-GBP (on WOB)
       if (product.price !== null) {
         this.log.log(`Clearing price for ${product.id} (unavailable=${unavailable}, probes=${priceProbes.join(',')})`);
         product.price = null;
@@ -540,20 +572,20 @@ export class ScraperService {
       detail = this.details.create({ product });
     }
 
-    const scrapedAt = new Date(); // <<< unified timestamp used twice
+    const scrapedAt = new Date(); // unified timestamp used twice
 
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
+    detail.lastScrapedAt = scrapedAt;
     detail.specs = {
       ...(detail.specs || {}),
       lastStatus: status,
       unavailable,
       priceProbes,
-      // mirror the timestamp & keep a copy of the canonical source URL
+      reviewCount: typeof reviewCount === 'number' ? reviewCount : undefined,
       lastScrapedAtISO: scrapedAt.toISOString(),
       sourceUrl: product.sourceUrl ?? null,
     };
-    detail.lastScrapedAt = scrapedAt;
 
     const saved = await this.details.save(detail);
     (saved as any).product = undefined;
