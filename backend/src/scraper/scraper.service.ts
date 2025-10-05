@@ -191,7 +191,6 @@ async function extractPriceAndCurrency(
 ): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
   const probes: string[] = [];
 
-  // define once and reuse
   const host = new URL(page.url()).host;
   const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
 
@@ -480,9 +479,7 @@ export class ScraperService {
       ratingAverage = ratingText ? Number(String(ratingText).replace(/[^\d.]/g, '')) : null;
     } catch (err) {
       scrapeError = err;
-      this.log.error(
-        `[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       await browser.close().catch(() => undefined);
     }
@@ -547,6 +544,9 @@ export class ScraperService {
       detail = this.details.create({ product });
     }
 
+    // timestamp now (used in both column and specs for UI fallback)
+    const now = new Date();
+
     detail.description = description ? decodeEntities(description) : null;
     detail.ratingAverage = Number.isFinite(ratingAverage as number) ? (ratingAverage as number) : null;
     detail.specs = {
@@ -554,8 +554,10 @@ export class ScraperService {
       lastStatus: status,
       unavailable,
       priceProbes,
+      sourceUrl: product.sourceUrl ?? null,
+      lastScrapedAtISO: now.toISOString(), // 👈 fallback for UI
     };
-    detail.lastScrapedAt = new Date();
+    detail.lastScrapedAt = now; // 👈 real column
 
     const saved = await this.details.save(detail);
     (saved as any).product = undefined;
