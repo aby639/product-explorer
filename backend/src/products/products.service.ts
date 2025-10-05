@@ -7,8 +7,7 @@ import { ProductDetail } from '../entities/product-detail.entity';
 import { ScraperService } from '../scraper/scraper.service';
 import { ListProductsQueryDto } from './dto/get-products.dto';
 
-const uuidV4Rx =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuidV4Rx = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 @Injectable()
 export class ProductsService {
@@ -46,10 +45,11 @@ export class ProductsService {
 
     const [items, total] = await this.products.findAndCount({
       where: categoryIds?.length ? { category: { id: In(categoryIds) } } : {},
-      relations: { category: true },
+      relations: { category: true }, // detail is eager on Product
       order: { id: 'ASC' },
       take: limit,
       skip: (page - 1) * limit,
+      // (we can safely select main fields for list view)
       select: {
         id: true,
         title: true,
@@ -64,37 +64,25 @@ export class ProductsService {
   }
 
   async getOneSafe(id: string, opts?: { refresh?: boolean }) {
+    // Always ensure it exists first (and loads relations)
     const exists = await this.products.findOne({
       where: { id },
-      relations: { category: true, detail: true },
+      relations: { category: true, detail: true }, // detail eager anyway, but explicit is fine
     });
     if (!exists) throw new NotFoundException('Product not found');
 
     if (opts?.refresh) {
       try {
         await this.scraper.refreshProduct(id);
-      } catch {}
+      } catch {
+        // swallow scrape errors so the page still renders stale data
+      }
     }
 
+    // Return full entity (NO custom select) so lastScrapedAt/specs can flow through
     const withDetail = await this.products.findOne({
       where: { id },
       relations: { category: true, detail: true },
-      select: {
-        id: true,
-        title: true,
-        image: true,
-        price: true,
-        currency: true,
-        sourceUrl: true, // for the external link
-        category: { id: true, title: true, slug: true },
-        detail: {
-          id: true,
-          description: true,
-          ratingAverage: true,
-          specs: true,
-          lastScrapedAt: true,
-        },
-      },
     });
 
     return withDetail!;
