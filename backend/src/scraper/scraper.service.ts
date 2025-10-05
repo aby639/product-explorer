@@ -220,6 +220,190 @@ async function extractRating(page: PWPage): Promise<{ value: number | null; coun
 
   return { value: html.v, count: html.c };
 }
+/**
+ * Extract price & currency with World of Books quirks handled.
+ */
+async function extractPriceAndCurrency(
+  page: PWPage,
+): Promise<{ price: number | null; currency: string | null; unavailable: boolean; probes: string[] }> {
+  const probes: string[] = [];
+
+  const host = new URL(page.url()).host;
+  const isWOB = /(^|\.)worldofbooks\.com$/i.test(host);
+
+  // Unavailable?
+  const unavailable = await page
+    .evaluate(() => {
+      const scope = document.querySelector('main') || document.body;
+      const txt = (scope?.textContent || '').toLowerCase();
+      return /currently unavailable|out of stock/i.test(txt);
+    })
+    .catch(() => false);
+
+  if (unavailable) {
+    probes.push('flag:unavailable');
+    return { price: null, currency: null, unavailable: true, probes };
+  }
+
+  // WOB “conditions” UI block
+  const fromWobConditions = await page
+    .evaluate(() => {
+      const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
+      const container =
+        document.querySelector('[data-testid="product-conditions"]') ||
+        document.querySelector('.product-condition__options') ||
+        document.querySelector('main') ||
+        document.body;
+
+      const buttons = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'button, [role="button"], .product-condition__option, [data-testid*="condition"]',
+        ),
+      );
+
+      const parseMoney = (s: string) => {
+        const m = s.replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+        return m ? Number(m[1]) : null;
+      };
+
+      const items = buttons
+        .map((btn) => {
+          const text = grab(btn);
+          const v = parseMoney(text);
+          const selected =
+            btn.getAttribute('aria-pressed') === 'true' ||
+            btn.getAttribute('aria-checked') === 'true' ||
+            btn.classList.contains('is-selected') ||
+            btn.classList.contains('selected');
+          const disabled =
+            btn.getAttribute('aria-disabled') === 'true' ||
+            /out of stock|unavailable/i.test(text) ||
+            btn.hasAttribute('disabled');
+          return { v, selected, disabled };
+        })
+        .filter((x) => (x.v ?? null) !== null) as Array<{ v: number; selected: boolean; disabled: boolean }>;
+
+      if (!items.length) return null;
+
+      const sel = items.find((x) => x.selected && !x.disabled);
+      if (sel) return { price: sel.v, currency: 'GBP' };
+
+      const inStock = items.filter((x) => !x.disabled);
+      inStock.sort((a, b) => a.v - b.v);
+      if (inStock[0]) return { price: inStock[0].v, currency: 'GBP' };
+
+      return null;
+    })
+    .catch(() => null);
+
+  if (fromWobConditions && Number.isFinite(fromWobConditions.price)) {
+    probes.push('price:wob-conditions');
+    return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
+  }
+
+  // JSON-LD offers
+  const fromLd = await page
+    .evaluate(() => {
+      const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
+      try {
+        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+        const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
+        const pushOffer = (o: any) => out.offers.push(o);
+
+        for (const s of scripts) {
+          const data = JSON.parse(s.textContent || 'null');
+          const list = asArray(data);
+          for (const item of list) {
+            const t = asArray(item?.['@type']);
+            if (!t.some((x: string) => /product|book/i.test(x))) continue;
+            asArray(item.offers).forEach(pushOffer);
+          }
+        }
+
+        let best: number | null = null;
+        let cur: string | null = null;
+
+        for (const o of out.offers) {
+          const avail = String(o?.availability || '').toLowerCase();
+          if (avail.includes('outofstock')) continue;
+          const raw = o?.lowPrice ?? o?.price ?? o?.priceSpecification?.price;
+          const p = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : typeof raw === 'number' ? raw : null;
+          const c = o?.priceCurrency ?? o?.priceSpecification?.priceCurrency ?? null;
+          if (p != null && p > 0 && p < 2000 && (best == null || p < best)) {
+            best = p;
+            cur = c || cur;
+          }
+        }
+
+        out.price = best;
+        out.currency = cur;
+      } catch {}
+      return out;
+    })
+    .catch(() => ({ price: null, currency: null } as any));
+
+  if (fromLd.price != null) {
+    if (!isWOB || fromLd.currency === 'GBP') {
+      probes.push('price:ld-json');
+      return { price: fromLd.price, currency: fromLd.currency ?? 'GBP', unavailable: false, probes };
+    } else {
+      probes.push('price:ld-json-non-gbp-ignored');
+    }
+  }
+
+  // Microdata/meta fallbacks
+  const fromMicro = await page
+    .evaluate(() => {
+      const found: Array<{ v: number; c: string | null }> = [];
+
+      document.querySelectorAll('[itemprop="price"]').forEach((el) => {
+        const v = Number(
+          (el.getAttribute('content') || el.getAttribute('value') || el.textContent || '').replace(/[^\d.]/g, ''),
+        );
+        const c = /£/.test(el.getAttribute('content') || '') ? 'GBP' : null;
+        if (Number.isFinite(v)) found.push({ v, c });
+      });
+
+      const metaAmt =
+        document.querySelector<HTMLMetaElement>('meta[property="product:price:amount"]') ||
+        document.querySelector<HTMLMetaElement>('meta[name="product:price:amount"]');
+      const metaCur =
+        document.querySelector<HTMLMetaElement>('meta[property="product:price:currency"]') ||
+        document.querySelector<HTMLMetaElement>('meta[name="product:price:currency"]');
+      if (metaAmt) {
+        const v = Number((metaAmt.content || '').replace(/[^\d.]/g, ''));
+        if (Number.isFinite(v)) found.push({ v, c: (metaCur?.content || null) as any });
+      }
+
+      return found;
+    })
+    .catch(() => [] as Array<{ v: number; c: string | null }>);
+
+  if (fromMicro.length) {
+    const sane = fromMicro.filter((x) => Number.isFinite(x.v) && x.v > 0 && x.v < 2000);
+    sane.sort((a, b) => a.v - b.v);
+    const pick = sane[0];
+    if (pick && (!isWOB || pick.c === 'GBP')) {
+      probes.push('price:micro/meta');
+      return { price: pick.v, currency: pick.c ?? 'GBP', unavailable: false, probes };
+    }
+    probes.push('price:micro-non-gbp-ignored');
+  }
+
+  // Last resort from HTML
+  const html = await page.content().catch(() => '');
+  if (html) {
+    const m = html.match(/(£|GBP)\s*(\d+(?:\.\d{1,2})?)/i);
+    if (m) {
+      probes.push('price:html-fallback');
+      return { price: Number(m[2]), currency: 'GBP', unavailable: false, probes };
+    }
+  }
+
+  probes.push('price:none');
+  return { price: null, currency: null, unavailable: false, probes };
+}
+
 
 /* -------------------------------- service ------------------------------- */
 
