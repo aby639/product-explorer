@@ -1,4 +1,3 @@
-// frontend/src/app/product/[id]/ProductClient.tsx
 'use client';
 
 import Link from 'next/link';
@@ -24,11 +23,15 @@ type Product = {
 
 type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
 
-const fetcher = (url: string) => fetch(url, { cache: 'no-store' }).then(r => r.ok ? r.json() : Promise.reject(r));
+const fetcher = (url: string) =>
+  fetch(url, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : Promise.reject(r)));
 
 const money = (value?: number | null, currency?: string | null) =>
   value != null && currency
-    ? new Intl.NumberFormat(currency === 'GBP' ? 'en-GB' : 'en-US', { style: 'currency', currency }).format(value)
+    ? new Intl.NumberFormat(currency === 'GBP' ? 'en-GB' : 'en-US', {
+        style: 'currency',
+        currency,
+      }).format(value)
     : null;
 
 export default function ProductClient({ product }: { product: Product }) {
@@ -48,6 +51,11 @@ export default function ProductClient({ product }: { product: Product }) {
     product.detail?.specs?.source_url ??
     product.sourceUrl ??
     (product.detail?.specs?.url as string | undefined);
+
+  // Fallback for last-scraped (column OR value mirrored into specs)
+  const lastScrapedISO =
+    product.detail?.lastScrapedAt ??
+    (product.detail?.specs?.lastScrapedAtISO as string | undefined);
 
   // Related from same category (exclude current)
   const relatedUrl = product.category?.id
@@ -102,8 +110,8 @@ export default function ProductClient({ product }: { product: Product }) {
                 {product.detail.description}
               </div>
               <div className="mt-2 text-xs opacity-60 flex gap-3">
-                {product.detail.lastScrapedAt ? (
-                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+                {lastScrapedISO ? (
+                  <span>Last scraped: {new Date(lastScrapedISO).toLocaleString()}</span>
                 ) : (
                   <span>Last scraped: —</span>
                 )}
