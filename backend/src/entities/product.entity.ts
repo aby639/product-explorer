@@ -22,7 +22,7 @@ export class Product {
   @Column({ type: 'text', nullable: true })
   image?: string | null;
 
-  // DECIMAL in DB, number in JS; must be nullable so we can clear on "Unavailable"
+  // DECIMAL in DB, number in JS
   @Column({
     type: 'numeric',
     precision: 10,
@@ -35,11 +35,11 @@ export class Product {
   })
   price?: number | null;
 
-  // keep simple varchar; nullable is fine
   @Column({ type: 'varchar', length: 8, nullable: true })
   currency?: string | null;
 
   @Column({ type: 'text', nullable: true })
+  @Index('idx_product_source_url')
   sourceUrl?: string | null;
 
   @ManyToOne(() => Category, (c) => c.products, {
@@ -49,7 +49,9 @@ export class Product {
   @Index('idx_product_category')
   category!: Category;
 
-  @OneToOne(() => ProductDetail, (d) => d.product, { cascade: true })
+  // Eager so detail is always present (fixes lastScrapedAt not showing up)
+  // NOTE: @JoinColumn is defined on ProductDetail side; no need to repeat here.
+  @OneToOne(() => ProductDetail, (d) => d.product, { cascade: true, eager: true })
   detail?: ProductDetail | null;
 
   @OneToMany(() => Review, (r) => r.product, { cascade: true })
