@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import useSWR from 'swr';
+import { useMemo } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -11,19 +12,20 @@ type Product = {
   image?: string | null;
   price?: number | null;
   currency?: string | null;
-  sourceUrl?: string | null; // optional at root
+  sourceUrl?: string | null;
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
     description?: string | null;
     ratingAverage?: number | null;
     lastScrapedAt?: string | null;
-    specs?: Record<string, any> | null; // free-form bag
+    specs?: Record<string, any> | null;
   } | null;
 };
 
 type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
 
-const fetcher = (url: string) => fetch(url).then((r) => (r.ok ? r.json() : Promise.reject(r)));
+const fetcher = (url: string) =>
+  fetch(url, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : Promise.reject(r)));
 
 const money = (value?: number | null, currency?: string | null) =>
   value != null && currency
@@ -42,46 +44,72 @@ export default function ProductClient({ product }: { product: Product }) {
     else window.location.href = '/';
   };
 
-  const price = money(product.price, product.currency);
+  /** Live product data (fallback to server-provided `product`) */
+  const productUrl = useMemo(() => {
+    const u = new URL(`${API}/products/${product.id}`);
+    // tiny cache-buster based on time to be safe against proxies
+    u.searchParams.set('k', String(Math.floor(Date.now() / 30000)));
+    return u.toString();
+  }, [product.id]);
+
+  const { data, mutate, isLoading } = useSWR<Product>(productUrl, fetcher, {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+    fallbackData: product,
+  });
+
+  const current = data ?? product;
+
+  const price = money(current.price, current.currency);
 
   // try to find the canonical source URL from several places but **typed**
   const sourceUrl: string | undefined =
-    product.detail?.specs?.sourceUrl ??
-    product.detail?.specs?.source_url ??
-    product.sourceUrl ??
-    (product.detail?.specs?.url as string | undefined);
+    current.detail?.specs?.sourceUrl ??
+    current.detail?.specs?.source_url ??
+    current.sourceUrl ??
+    (current.detail?.specs?.url as string | undefined);
+
+  /** Force refresh: POST to backend then re-fetch the product (no cache) */
+  const onForceRefresh = async () => {
+    await fetch(`${API}/products/${current.id}/refresh`, { method: 'POST' });
+    await mutate(); // revalidate — will show updated lastScrapedAt immediately
+  };
 
   // related products from the same category (exclude current)
-  const relatedUrl =
-    product.category?.id
-      ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
-      : null;
+  const relatedUrl = current.category?.id
+    ? `${API}/products?category=${encodeURIComponent(current.category.id)}&limit=6`
+    : null;
 
-  const { data: related } = useSWR<GridResponse>(relatedUrl, fetcher, {
+  const { data: related } = useSWR<GridResponse>(relatedUrl ?? null, fetcher, {
     revalidateOnFocus: false,
     keepPreviousData: true,
   });
 
-  const relatedItems =
-    (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
+  const relatedItems = (related?.items ?? []).filter((p) => p.id !== current.id).slice(0, 6);
 
   return (
     <>
-      <button onClick={handleBack} className="btn">← Back</button>
+      <button onClick={handleBack} className="btn">
+        ← Back
+      </button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={product.image ?? ''}
-            alt={product.title}
+            src={current.image ?? ''}
+            alt={current.title}
             className="max-h-[420px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
-          <h1 className="section-title">{product.title}</h1>
-          {price ? <div className="text-xl font-semibold">{price}</div> : <div className="opacity-70">Price not available</div>}
+          <h1 className="section-title">{current.title}</h1>
+          {price ? (
+            <div className="text-xl font-semibold">{price}</div>
+          ) : (
+            <div className="opacity-70">Price not available</div>
+          )}
 
           <div className="flex gap-3">
             {sourceUrl && (
@@ -89,21 +117,26 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            <Link href={`/product/${product.id}?refresh=true`} className="btn btn-ghost">
+            <button onClick={onForceRefresh} className="btn btn-ghost" aria-busy={isLoading}>
               Force refresh
-            </Link>
+            </button>
           </div>
 
-          {product?.detail?.description && (
+          {current?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-              <div className="whitespace-pre-line leading-relaxed">{product.detail.description}</div>
+              <div className="whitespace-pre-line leading-relaxed">
+                {current.detail.description}
+              </div>
               <div className="mt-2 text-xs opacity-60 flex gap-3">
-                {product.detail.lastScrapedAt && (
-                  <span>Last scraped: {new Date(product.detail.lastScrapedAt).toLocaleString()}</span>
+                {current.detail.lastScrapedAt && (
+                  <span>
+                    Last scraped:{' '}
+                    {new Date(current.detail.lastScrapedAt).toLocaleString()}
+                  </span>
                 )}
-                {typeof product.detail.ratingAverage === 'number' && (
-                  <span>Rating: {product.detail.ratingAverage.toFixed(1)} / 5</span>
+                {typeof current.detail.ratingAverage === 'number' && (
+                  <span>Rating: {current.detail.ratingAverage.toFixed(1)} / 5</span>
                 )}
               </div>
             </div>
@@ -114,7 +147,7 @@ export default function ProductClient({ product }: { product: Product }) {
       {relatedItems.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">
-            Related in {product.category?.title ?? 'this category'}
+            Related in {current.category?.title ?? 'this category'}
           </h2>
           <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {relatedItems.map((p) => (
@@ -130,7 +163,9 @@ export default function ProductClient({ product }: { product: Product }) {
                 <div className="text-sm opacity-80 mt-1">
                   {money(p.price, p.currency) ?? '—'}
                 </div>
-                <Link href={`/product/${p.id}`} className="btn mt-3">View</Link>
+                <Link href={`/product/${p.id}`} className="btn mt-3">
+                  View
+                </Link>
               </li>
             ))}
           </ul>
