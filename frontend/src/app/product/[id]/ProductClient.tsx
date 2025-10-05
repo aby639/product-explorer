@@ -16,8 +16,8 @@ type Product = {
   detail?: {
     description?: string | null;
     ratingAverage?: number | null;
-    lastScrapedAt?: string | null; // timestamptz in DB
-    specs?: Record<string, any> | null; // JSON bag
+    lastScrapedAt?: string | null;      // DB column (timestamptz)
+    specs?: Record<string, any> | null; // JSON bag (we mirror timestamp & review count here)
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
@@ -62,11 +62,8 @@ export default function ProductClient({ product }: { product: Product }) {
     (product.detail as any)?.createdAt ??
     null;
 
-  // Review count from specs (if we scraped it)
-  const reviewCount =
-    typeof product.detail?.specs?.reviewCount === 'number'
-      ? (product.detail!.specs!.reviewCount as number)
-      : undefined;
+  const reviewsCount =
+    (product.detail?.specs?.reviewsCount as number | undefined | null) ?? null;
 
   // Related from same category (exclude current)
   const relatedUrl = product.category?.id
@@ -108,7 +105,7 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            {/* IMPORTANT: keep prefetch off and use the ?refresh=true param */}
+            {/* IMPORTANT: keep prefetch off and use the refresh query param */}
             <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
             </Link>
@@ -120,16 +117,21 @@ export default function ProductClient({ product }: { product: Product }) {
               <div className="whitespace-pre-line leading-relaxed">
                 {product.detail.description}
               </div>
-              <div className="mt-2 text-xs opacity-60 flex gap-3 flex-wrap">
-                <span>
-                  Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}
-                </span>
+
+              {/* Rating + last-scraped row */}
+              <div className="mt-2 text-xs opacity-80 flex flex-wrap gap-4 items-center">
                 {typeof product.detail.ratingAverage === 'number' && (
-                  <span>
-                    Rating: {product.detail.ratingAverage.toFixed(1)} / 5
-                    {typeof reviewCount === 'number' ? ` (${reviewCount} reviews)` : ''}
+                  <span className="inline-flex items-center gap-1">
+                    <span className="font-semibold">{product.detail.ratingAverage.toFixed(1)}</span>
+                    <span>/ 5</span>
+                    {typeof reviewsCount === 'number' && reviewsCount > 0 && (
+                      <span className="opacity-70">({reviewsCount} reviews)</span>
+                    )}
                   </span>
                 )}
+                <span className="opacity-70">
+                  Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}
+                </span>
               </div>
             </div>
           )}
