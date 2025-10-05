@@ -40,6 +40,7 @@ async function gotoWithRetry(page: PWPage, url: string) {
   return page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null);
 }
 
+// Minimal HTML entity decode
 function decodeEntities(s: string): string {
   if (!s) return s;
   const named = s
@@ -119,7 +120,11 @@ async function extractImage(page: PWPage): Promise<string | null> {
     (await page
       .evaluate(() => {
         const absolutize = (u: string) => {
-          try { return new URL(u, location.href).toString(); } catch { return null; }
+          try {
+            return new URL(u, location.href).toString();
+          } catch {
+            return null;
+          }
         };
         const isLogo = (u: string, alt = '') =>
           !u ||
@@ -127,14 +132,14 @@ async function extractImage(page: PWPage): Promise<string | null> {
           /(logo|sprite|icon|favicon|trustpilot|placeholder|opengraph\-default|og\-image\-default)/i.test(u) ||
           /(logo|trustpilot|icon|placeholder)/i.test(alt);
 
-        // OG/Twitter first
+        // 1) OG/Twitter
         const og =
           document
             .querySelector<HTMLMetaElement>('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]')
             ?.content?.trim() || null;
         if (og && !isLogo(og)) return absolutize(og);
 
-        // JSON-LD Product/Book image
+        // 2) JSON-LD Product/Book image
         const ldList = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
         for (const s of ldList) {
           try {
@@ -151,7 +156,7 @@ async function extractImage(page: PWPage): Promise<string | null> {
           } catch {}
         }
 
-        // Best portrait IMG
+        // 3) Best portrait IMG on page
         const root = document.querySelector('main') || document.body;
         const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
         const candidates = imgs
@@ -178,48 +183,82 @@ async function extractImage(page: PWPage): Promise<string | null> {
   return raw;
 }
 
-/** JSON-LD & HTML fallbacks for rating and review count */
-async function extractRating(page: PWPage): Promise<{ value: number | null; count: number | null }> {
-  // Try JSON-LD first
-  const ld = await page.evaluate(() => {
-    const result = { ratingValue: null as number | null, ratingCount: null as number | null };
-    try {
-      const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
-      const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
-      for (const s of scripts) {
-        const data = JSON.parse(s.textContent || 'null');
-        for (const item of asArray(data)) {
-          const types = asArray(item?.['@type']);
-          if (!types.some((t: string) => /product|book/i.test(t))) continue;
-          const agg = item?.aggregateRating ?? item?.AggregateRating ?? null;
-          if (!agg) continue;
-          const val = Number(String(agg?.ratingValue ?? agg?.rating ?? '').replace(/[^\d.]/g, ''));
-          const cnt = Number(String(agg?.reviewCount ?? agg?.ratingCount ?? '').replace(/[^\d]/g, ''));
-          if (Number.isFinite(val)) result.ratingValue = val;
-          if (Number.isFinite(cnt)) result.ratingCount = cnt;
+/** JSON-LD & ARIA/text fallbacks for rating and review count */
+async function extractAggregateRating(
+  page: PWPage,
+): Promise<{ value: number | null; count: number | null; source?: string }> {
+  // Prefer JSON-LD Product.aggregateRating
+  const fromLd = await page
+    .evaluate(() => {
+      const out = { value: null as number | null, count: null as number | null };
+      try {
+        const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'));
+        const asArray = (x: any) => (Array.isArray(x) ? x : x ? [x] : []);
+        for (const s of scripts) {
+          const json = JSON.parse(s.textContent || 'null');
+          for (const node of asArray(json)) {
+            const types = asArray(node?.['@type']).map((t: string) => String(t).toLowerCase());
+            if (!types.includes('product') && !types.includes('book')) continue;
+            const agg = node?.aggregateRating;
+            if (!agg) continue;
+            const vRaw = agg.ratingValue ?? agg.rating ?? null;
+            const cRaw = agg.reviewCount ?? agg.ratingCount ?? null;
+            const v =
+              typeof vRaw === 'string'
+                ? Number(vRaw.replace(/[^\d.]/g, ''))
+                : typeof vRaw === 'number'
+                ? vRaw
+                : null;
+            const c =
+              typeof cRaw === 'string'
+                ? Number(cRaw.replace(/[^\d]/g, ''))
+                : typeof cRaw === 'number'
+                ? cRaw
+                : null;
+            if (v != null && v > 0 && v <= 5) {
+              out.value = v;
+              if (c != null && c >= 0) out.count = c;
+              return out;
+            }
+          }
         }
-      }
-    } catch {}
-    return result;
-  }).catch(() => ({ ratingValue: null, ratingCount: null }));
+      } catch {}
+      return out;
+    })
+    .catch(() => ({ value: null, count: null }));
 
-  if (ld.ratingValue != null || ld.ratingCount != null) {
-    return { value: ld.ratingValue, count: ld.ratingCount };
+  if (fromLd.value != null) return { ...fromLd, source: 'ld-json' };
+
+  // Fallback: element with aria-label like "4.6 out of 5"
+  const fromAria = await page
+    .evaluate(() => {
+      const root = document.querySelector('main') || document.body;
+      const els = Array.from(root.querySelectorAll<HTMLElement>('[aria-label],[aria-labelledby]'));
+      for (const el of els) {
+        const label =
+          el.getAttribute('aria-label') ||
+          (el.getAttribute('aria-labelledby')
+            ? document.getElementById(el.getAttribute('aria-labelledby')!)?.textContent || ''
+            : '');
+        const m = label?.match?.(/(\d+(?:\.\d)?)\s*(?:out of|\/)\s*5/i);
+        if (m) return Number(m[1]);
+      }
+      return null;
+    })
+    .catch(() => null);
+
+  if (fromAria != null && fromAria > 0 && fromAria <= 5) {
+    return { value: fromAria, count: null, source: 'aria' };
   }
 
-  // Microdata minimal fallback
-  const html = await page.evaluate(() => {
-    const vEl = document.querySelector('[itemprop="ratingValue"]');
-    const cEl =
-      document.querySelector('[itemprop="reviewCount"]') ||
-      document.querySelector('[itemprop="ratingCount"]');
-    const v = vEl ? Number((vEl.getAttribute('content') || vEl.textContent || '').replace(/[^\d.]/g, '')) : null;
-    const c = cEl ? Number((cEl.getAttribute('content') || cEl.textContent || '').replace(/[^\d]/g, '')) : null;
-    return { v: Number.isFinite(v as number) ? (v as number) : null, c: Number.isFinite(c as number) ? (c as number) : null };
-  }).catch(() => ({ v: null, c: null }));
+  // Last txt fallback
+  const txt = await page.evaluate(() => (document.querySelector('main') || document.body).textContent || '').catch(() => '');
+  const m = txt?.match?.(/(\d+(?:\.\d)?)\s*(?:\/|out of)\s*5/i);
+  if (m) return { value: Number(m[1]), count: null, source: 'text' };
 
-  return { value: html.v, count: html.c };
+  return { value: null, count: null };
 }
+
 /**
  * Extract price & currency with World of Books quirks handled.
  */
@@ -245,7 +284,7 @@ async function extractPriceAndCurrency(
     return { price: null, currency: null, unavailable: true, probes };
   }
 
-  // WOB “conditions” UI block
+  // WOB conditions UI
   const fromWobConditions = await page
     .evaluate(() => {
       const grab = (el: Element | null | undefined) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -301,7 +340,7 @@ async function extractPriceAndCurrency(
     return { price: fromWobConditions.price, currency: fromWobConditions.currency, unavailable: false, probes };
   }
 
-  // JSON-LD offers
+  // JSON-LD product offers
   const fromLd = await page
     .evaluate(() => {
       const out = { price: null as number | null, currency: null as string | null, offers: [] as any[] };
@@ -351,7 +390,7 @@ async function extractPriceAndCurrency(
     }
   }
 
-  // Microdata/meta fallbacks
+  // Microdata/meta
   const fromMicro = await page
     .evaluate(() => {
       const found: Array<{ v: number; c: string | null }> = [];
@@ -403,7 +442,6 @@ async function extractPriceAndCurrency(
   probes.push('price:none');
   return { price: null, currency: null, unavailable: false, probes };
 }
-
 
 /* -------------------------------- service ------------------------------- */
 
@@ -510,10 +548,10 @@ export class ScraperService {
       unavailable = priceRes.unavailable;
       priceProbes = priceRes.probes;
 
-      // rating (JSON-LD + fallbacks)
-      const r = await extractRating(page);
-      ratingAverage = Number.isFinite(r.value as number) ? (r.value as number) : null;
-      ratingCount = Number.isFinite(r.count as number) ? (r.count as number) : null;
+      // Ratings
+      const rating = await extractAggregateRating(page);
+      ratingAverage = Number.isFinite(rating.value as number) ? (rating.value as number) : null;
+      ratingCount = Number.isFinite(rating.count as number) ? (rating.count as number) : null;
     } catch (err) {
       scrapeError = err;
       this.log.error(`[ScraperService] scrape failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -523,8 +561,8 @@ export class ScraperService {
 
     this.log.log(
       `Found: status=${status} img=${!!imageAbs} descLen=${(description || '').length} price=${priceNum ?? 'na'} ` +
-      `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
-      `reviews=${ratingCount ?? 'na'} probes=${priceProbes.join(',')}`,
+        `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
+        `reviews=${ratingCount ?? 'na'} probes=${priceProbes.join(',')}`,
     );
 
     // ---------- persist ----------
@@ -587,7 +625,7 @@ export class ScraperService {
       priceProbes,
       lastScrapedAtISO: scrapedAt.toISOString(),
       sourceUrl: product.sourceUrl ?? null,
-      reviewsCount: ratingCount ?? null, // <— keep review count in the JSON bag
+      reviewCount: ratingCount ?? null, // << keep review count in JSON bag
     };
     detail.lastScrapedAt = scrapedAt;
 
