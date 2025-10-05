@@ -49,7 +49,7 @@ export class Product {
   @Index('idx_product_category')
   category!: Category;
 
-  // Eager so detail is always present (fixes lastScrapedAt not showing up)
+  // Eager so detail is always present
   @OneToOne(() => ProductDetail, (d) => d.product, { cascade: true, eager: true })
   detail?: ProductDetail | null;
 
