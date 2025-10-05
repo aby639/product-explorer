@@ -16,9 +16,8 @@ type Product = {
   detail?: {
     description?: string | null;
     ratingAverage?: number | null;
-    lastScrapedAt?: string | null;               // DB column (timestamptz)
-    specs?: Record<string, any> | null;          // JSON bag (may mirror timestamp)
-    // Optional audit fields if you added them:
+    lastScrapedAt?: string | null; // timestamptz in DB
+    specs?: Record<string, any> | null; // JSON bag
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
@@ -55,13 +54,19 @@ export default function ProductClient({ product }: { product: Product }) {
     product.sourceUrl ??
     (product.detail?.specs?.url as string | undefined);
 
-  // Pick the best available "last scraped" timestamp
+  // Best available "last scraped" timestamp
   const pickDate =
-    product.detail?.lastScrapedAt ??                                  // DB column
-    (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??// mirrored ISO in specs
-    (product.detail as any)?.updatedAt ??                              // audit fallback
-    (product.detail as any)?.createdAt ??                              // audit fallback
+    product.detail?.lastScrapedAt ??
+    (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??
+    (product.detail as any)?.updatedAt ??
+    (product.detail as any)?.createdAt ??
     null;
+
+  // Review count from specs (if we scraped it)
+  const reviewCount =
+    typeof product.detail?.specs?.reviewCount === 'number'
+      ? (product.detail!.specs!.reviewCount as number)
+      : undefined;
 
   // Related from same category (exclude current)
   const relatedUrl = product.category?.id
@@ -103,7 +108,7 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            {/* IMPORTANT: keep prefetch off and use the refresh query param */}
+            {/* IMPORTANT: keep prefetch off and use the ?refresh=true param */}
             <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
             </Link>
@@ -115,12 +120,15 @@ export default function ProductClient({ product }: { product: Product }) {
               <div className="whitespace-pre-line leading-relaxed">
                 {product.detail.description}
               </div>
-              <div className="mt-2 text-xs opacity-60 flex gap-3">
+              <div className="mt-2 text-xs opacity-60 flex gap-3 flex-wrap">
                 <span>
                   Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}
                 </span>
                 {typeof product.detail.ratingAverage === 'number' && (
-                  <span>Rating: {product.detail.ratingAverage.toFixed(1)} / 5</span>
+                  <span>
+                    Rating: {product.detail.ratingAverage.toFixed(1)} / 5
+                    {typeof reviewCount === 'number' ? ` (${reviewCount} reviews)` : ''}
+                  </span>
                 )}
               </div>
             </div>
