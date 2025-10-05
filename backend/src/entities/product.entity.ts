@@ -50,7 +50,6 @@ export class Product {
   category!: Category;
 
   // Eager so detail is always present (fixes lastScrapedAt not showing up)
-  // NOTE: @JoinColumn is defined on ProductDetail side; no need to repeat here.
   @OneToOne(() => ProductDetail, (d) => d.product, { cascade: true, eager: true })
   detail?: ProductDetail | null;
 
