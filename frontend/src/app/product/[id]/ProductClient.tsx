@@ -16,8 +16,8 @@ type Product = {
   detail?: {
     description?: string | null;
     ratingAverage?: number | null;
-    lastScrapedAt?: string | null;      // DB column (timestamptz)
-    specs?: Record<string, any> | null; // JSON bag (we mirror timestamp & review count here)
+    lastScrapedAt?: string | null;
+    specs?: Record<string, any> | null;
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
@@ -37,7 +37,6 @@ const money = (value?: number | null, currency?: string | null) =>
     : null;
 
 export default function ProductClient({ product }: { product: Product }) {
-  // One back button: prefer saved last list path, else history.back, else home
   const handleBack = () => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
     if (saved) window.location.href = saved;
@@ -47,14 +46,12 @@ export default function ProductClient({ product }: { product: Product }) {
 
   const price = money(product.price, product.currency);
 
-  // Canonical product source URL (try JSON bag first, then root)
   const sourceUrl: string | undefined =
     product.detail?.specs?.sourceUrl ??
     product.detail?.specs?.source_url ??
     product.sourceUrl ??
     (product.detail?.specs?.url as string | undefined);
 
-  // Best available "last scraped" timestamp
   const pickDate =
     product.detail?.lastScrapedAt ??
     (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??
@@ -62,10 +59,6 @@ export default function ProductClient({ product }: { product: Product }) {
     (product.detail as any)?.createdAt ??
     null;
 
-  const reviewsCount =
-    (product.detail?.specs?.reviewsCount as number | undefined | null) ?? null;
-
-  // Related from same category (exclude current)
   const relatedUrl = product.category?.id
     ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
     : null;
@@ -76,6 +69,11 @@ export default function ProductClient({ product }: { product: Product }) {
   });
 
   const relatedItems = (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
+
+  // rating to UI bits
+  const ratingValue = typeof product.detail?.ratingAverage === 'number' ? product.detail!.ratingAverage! : null;
+  const ratingCount = product.detail?.specs?.reviewCount as number | undefined;
+  const ratingStars = ratingValue != null ? '★'.repeat(Math.round(ratingValue)) : '';
 
   return (
     <>
@@ -105,7 +103,6 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            {/* IMPORTANT: keep prefetch off and use the refresh query param */}
             <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
             </Link>
@@ -117,21 +114,17 @@ export default function ProductClient({ product }: { product: Product }) {
               <div className="whitespace-pre-line leading-relaxed">
                 {product.detail.description}
               </div>
-
-              {/* Rating + last-scraped row */}
-              <div className="mt-2 text-xs opacity-80 flex flex-wrap gap-4 items-center">
-                {typeof product.detail.ratingAverage === 'number' && (
-                  <span className="inline-flex items-center gap-1">
-                    <span className="font-semibold">{product.detail.ratingAverage.toFixed(1)}</span>
-                    <span>/ 5</span>
-                    {typeof reviewsCount === 'number' && reviewsCount > 0 && (
-                      <span className="opacity-70">({reviewsCount} reviews)</span>
-                    )}
-                  </span>
-                )}
-                <span className="opacity-70">
+              <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-3 items-center">
+                <span>
                   Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}
                 </span>
+                {ratingValue != null && (
+                  <span title={`${ratingValue.toFixed(1)} / 5`}>
+                    <span aria-hidden="true" className="mr-1">{ratingStars || '★'}</span>
+                    {ratingValue.toFixed(1)} / 5
+                    {typeof ratingCount === 'number' && ratingCount >= 0 ? ` (${ratingCount})` : ''}
+                  </span>
+                )}
               </div>
             </div>
           )}
