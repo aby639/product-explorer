@@ -4,8 +4,8 @@ Search, view, and auto-refresh book product data from **World of Books** (and ot
 Backend scrapes and normalizes data; frontend presents products with prices, description, image, ratings and review counts when available.
 
 > **Live**
-> Frontend: `https://product-explorer-frontend-*.onrender.com`
-> Backend: `https://product-explorer-backend-*.onrender.com`
+> Frontend: `(https://product-explorer-frontend-1r8k.onrender.com)`
+> Backend: `https://product-explorer-backend-0oli.onrender.com`
 
 ---
 
