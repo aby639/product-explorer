@@ -1,6 +1,5 @@
 'use client';
 
-import {useCallback, useMemo, useRef, useState} from 'react';
 import Link from 'next/link';
 import useSWR from 'swr';
 
@@ -16,9 +15,9 @@ type Product = {
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
     description?: string | null;
-    ratingAverage?: number | null;
-    lastScrapedAt?: string | null;      // timestamptz in DB
-    specs?: Record<string, any> | null;  // jsonb bag (may mirror timestamp, review count, etc.)
+    ratingAverage?: number | null;         // numeric 0..5 if available
+    lastScrapedAt?: string | null;         // DB timestamptz (ISO)
+    specs?: Record<string, any> | null;    // JSON bag (may have lastScrapedAtISO, reviewsCount, sourceUrl)
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
@@ -39,47 +38,20 @@ const money = (value?: number | null, currency?: string | null) =>
       }).format(value)
     : null;
 
-/* ---------- small helpers ---------- */
-
-// Pick the best available "last scraped" timestamp from a product
-function getLastScraped(p?: Product | null): string | null {
-  if (!p?.detail) return null;
-  return (
-    p.detail.lastScrapedAt ??
-    (p.detail.specs?.lastScrapedAtISO as string | undefined) ??
-    (p.detail as any)?.updatedAt ??
-    (p.detail as any)?.createdAt ??
-    null
-  );
-}
-
-// Try POST /refresh (if you add it later). Otherwise fall back to GET ?refresh=true (your current backend behavior).
-async function triggerScrape(baseUrl: string, id: string) {
-  try {
-    const post = await fetch(`${baseUrl}/products/${id}/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    if (post.ok) return true;
-  } catch {}
-  // Fallback – this already triggers a scrape on your backend:
-  try {
-    const get = await fetch(`${baseUrl}/products/${id}?refresh=true`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    return get.ok;
-  } catch {
-    return false;
-  }
-}
+// Local + relative timestamp
+const formatWhen = (iso?: string | null) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const deltaMin = Math.round((Date.now() - d.getTime()) / 60000);
+  const rel =
+    deltaMin < 1 ? 'just now' :
+    deltaMin < 60 ? `${deltaMin} min ago` :
+    `${Math.round(deltaMin / 60)} hr ago`;
+  return `${d.toLocaleString()} (${rel})`;
+};
 
 export default function ProductClient({ product }: { product: Product }) {
-  // keep a local copy so we can live-update fields after polling
-  const [current, setCurrent] = useState<Product>(product);
-  const [refreshing, setRefreshing] = useState(false);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
+  // Back button: prefer saved list path; else history; else home
   const handleBack = () => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
     if (saved) window.location.href = saved;
@@ -87,19 +59,26 @@ export default function ProductClient({ product }: { product: Product }) {
     else window.location.href = '/';
   };
 
-  const price = money(current.price, current.currency);
+  const price = money(product.price, product.currency);
 
+  // Canonical source URL (prefer JSON bag, then root)
   const sourceUrl: string | undefined =
-    (current.detail?.specs?.sourceUrl as string | undefined) ??
-    (current.detail?.specs?.source_url as string | undefined) ??
-    current.sourceUrl ??
-    (current.detail?.specs?.url as string | undefined);
+    (product.detail?.specs?.sourceUrl as string | undefined) ??
+    (product.detail?.specs?.source_url as string | undefined) ??
+    product.sourceUrl ??
+    (product.detail?.specs?.url as string | undefined);
 
-  const pickDate = getLastScraped(current);
+  // Best available "last scraped" timestamp
+  const pickDate: string | null =
+    product.detail?.lastScrapedAt ??
+    (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??
+    (product.detail as any)?.updatedAt ??
+    (product.detail as any)?.createdAt ??
+    null;
 
-  // Related (same category)
-  const relatedUrl = current.category?.id
-    ? `${API}/products?category=${encodeURIComponent(current.category.id)}&limit=6`
+  // Related in same category
+  const relatedUrl = product.category?.id
+    ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
     : null;
 
   const { data: related } = useSWR<GridResponse>(relatedUrl ?? null, fetcher, {
@@ -107,69 +86,27 @@ export default function ProductClient({ product }: { product: Product }) {
     keepPreviousData: true,
   });
 
-  const relatedItems = (related?.items ?? []).filter((p) => p.id !== current.id).slice(0, 6);
+  const relatedItems = (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
 
-  // Ratings UI
+  // Ratings bits (ratingAverage + specs.reviewsCount)
   const ratingValue =
-    typeof current.detail?.ratingAverage === 'number' ? current.detail.ratingAverage : null;
+    typeof product.detail?.ratingAverage === 'number' ? product.detail.ratingAverage : null;
 
-  const ratingCountRaw =
-    current.detail?.specs && typeof (current.detail.specs as any).reviewsCount !== 'undefined'
-      ? (current.detail.specs as any).reviewsCount
-      : null;
-  const ratingCount =
-    typeof ratingCountRaw === 'number' && isFinite(ratingCountRaw) ? ratingCountRaw : null;
+  const reviewsCountRaw =
+    product.detail?.specs &&
+    (
+      (product.detail.specs as any).reviewsCount ??        // our scraper key
+      (product.detail.specs as any).reviewCount ??         // fallback spelling
+      null
+    );
+
+  const reviewsCount =
+    typeof reviewsCountRaw === 'number' && isFinite(reviewsCountRaw) ? reviewsCountRaw : null;
 
   const ratingStars =
-    ratingValue != null ? '★'.repeat(Math.min(5, Math.max(1, Math.round(ratingValue)))) : '';
-
-  // Fetch the latest product once (no-cache) and put it in state
-  const refetchOnce = useCallback(async (): Promise<Product> => {
-    const fresh = await fetch(`${API}/products/${current.id}`, { cache: 'no-store' }).then((r) =>
-      r.ok ? r.json() : Promise.reject(r),
-    );
-    setCurrent(fresh);
-    return fresh;
-  }, [current.id]);
-
-  const handleForceRefresh = useCallback(async () => {
-    if (refreshing) return;
-    setRefreshing(true);
-
-    const before = getLastScraped(current);
-
-    // Kick off the scrape
-    await triggerScrape(API, current.id);
-
-    // Poll until lastScrapedAt actually changes (max ~35s)
-    const started = Date.now();
-    const stop = () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    };
-
-    const poll = async () => {
-      try {
-        const fresh = await refetchOnce();
-        const after = getLastScraped(fresh);
-        if (after && after !== before) {
-          stop();
-          setRefreshing(false);
-          return;
-        }
-      } catch {
-        // ignore transient errors
-      }
-      if (Date.now() - started > 35_000) {
-        stop();
-        setRefreshing(false);
-      }
-    };
-
-    // immediate attempt, then every 2s if still refreshing
-    await poll();
-    if (refreshing) pollingRef.current = setInterval(poll, 2000);
-  }, [current, refreshing, refetchOnce]);
+    ratingValue != null
+      ? '★'.repeat(Math.min(5, Math.max(1, Math.round(ratingValue))))
+      : '';
 
   return (
     <>
@@ -179,14 +116,14 @@ export default function ProductClient({ product }: { product: Product }) {
         <div className="card p-6 flex items-center justify-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={current.image ?? ''}
-            alt={current.title}
+            src={product.image ?? ''}
+            alt={product.title}
             className="max-h-[420px] object-contain"
           />
         </div>
 
         <div className="space-y-4">
-          <h1 className="section-title">{current.title}</h1>
+          <h1 className="section-title">{product.title}</h1>
 
           {price ? (
             <div className="text-xl font-semibold">{price}</div>
@@ -194,54 +131,53 @@ export default function ProductClient({ product }: { product: Product }) {
             <div className="opacity-70">Price not available</div>
           )}
 
-          <div className="flex items-center gap-3">
+          <div className="flex gap-3">
             {sourceUrl && (
               <a href={sourceUrl} target="_blank" rel="noreferrer" className="btn btn-ghost">
                 View on World of Books
               </a>
             )}
-            <button onClick={handleForceRefresh} className="btn btn-ghost">
+            {/* IMPORTANT: keep prefetch off, and pass ?refresh=true to trigger a scrape server-side */}
+            <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
-            </button>
-            {refreshing && <span className="text-xs opacity-70">refreshing…</span>}
+            </Link>
           </div>
 
-          {current?.detail?.description && (
-            <div className="card p-4">
-              <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-              <div className="whitespace-pre-line leading-relaxed">
-                {current.detail.description}
-              </div>
-
-              <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-4 items-center">
-                <span>Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}</span>
-
-                <span className="inline-flex items-center gap-1">
-                  Rating:
-                  {ratingValue != null ? (
-                    <>
-                      <span aria-hidden="true">{ratingStars || '★'}</span>
-                      {ratingValue.toFixed(1)} / 5
-                    </>
-                  ) : (
-                    ' Not available'
-                  )}
-                </span>
-
-                <span className="inline-flex items-center gap-1">
-                  Reviews:
-                  {ratingCount != null ? ratingCount : ' Not available'}
-                </span>
-              </div>
+          {/* Meta panel: always visible (even if description is empty) */}
+          <div className="card p-4">
+            <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
+            <div className="whitespace-pre-line leading-relaxed">
+              {product.detail?.description?.trim() || '—'}
             </div>
-          )}
+
+            <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-4 items-center">
+              <span>Last scraped: {formatWhen(pickDate)}</span>
+
+              <span className="inline-flex items-center gap-1">
+                Rating:
+                {ratingValue != null ? (
+                  <>
+                    <span aria-hidden="true">{ratingStars || '★'}</span>
+                    {ratingValue.toFixed(1)} / 5
+                  </>
+                ) : (
+                  ' Not available'
+                )}
+              </span>
+
+              <span className="inline-flex items-center gap-1">
+                Reviews:
+                {reviewsCount != null ? reviewsCount : ' Not available'}
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 
       {relatedItems.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">
-            Related in {current.category?.title ?? 'this category'}
+            Related in {product.category?.title ?? 'this category'}
           </h2>
           <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {relatedItems.map((p) => (
