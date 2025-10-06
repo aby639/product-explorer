@@ -280,7 +280,7 @@ npm run dev
 * [x] Live Render links (backend + frontend)
 
 **Demo video:** *https://drive.google.com/file/d/154sg_MU7954AA2i5nKBEJMcpFakV8uVI/view?usp=drive_web *
-**Issue:** (https://github.com/aby639/product-explorer/issues/1)
+**Issue:** https://github.com/aby639/product-explorer/issues/1
 
 ---
 
