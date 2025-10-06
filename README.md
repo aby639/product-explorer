@@ -15,8 +15,8 @@ Backend scrapes and normalizes data; frontend presents products with prices, des
 * **Scraped product details**: description, cover image, price (GBP), currency, availability status, “last scraped” timestamp.
 * **Ratings & reviews** (best-effort):
 
-  * `detail.ratingAverage` — numeric average (0–5) when JSON-LD or microdata is present.
-  * `detail.specs.reviewsCount` — review/ratings count if exposed by the page.
+  * `detail.ratingAverage` - numeric average (0–5) when JSON-LD or microdata is present.
+  * `detail.specs.reviewsCount` - review/ratings count if exposed by the page.
 * **Force refresh** button:
 
   * Triggers a new scrape for the product.
@@ -280,7 +280,7 @@ npm run dev
 * [x] Live Render links (backend + frontend)
 
 **Demo video:** *https://drive.google.com/file/d/154sg_MU7954AA2i5nKBEJMcpFakV8uVI/view?usp=drive_web *
-**Issue:** [https://github.com/aby639/product-explorer/issues/1](https://github.com/aby639/product-explorer/issues/1)
+**Issue:** (https://github.com/aby639/product-explorer/issues/1)
 
 ---
 
