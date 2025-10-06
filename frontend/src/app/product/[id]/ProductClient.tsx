@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import useSWR from 'swr';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
@@ -15,9 +16,9 @@ type Product = {
   category?: { id: string; title: string; slug?: string | null } | null;
   detail?: {
     description?: string | null;
-    ratingAverage?: number | null;         // numeric 0..5 if available
-    lastScrapedAt?: string | null;         // DB timestamptz (ISO)
-    specs?: Record<string, any> | null;    // JSON bag (may have lastScrapedAtISO, reviewsCount, sourceUrl)
+    ratingAverage?: number | null;
+    lastScrapedAt?: string | null;      // timestamptz from DB
+    specs?: Record<string, any> | null; // JSON bag (can mirror timestamp, review count, status)
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
@@ -38,45 +39,70 @@ const money = (value?: number | null, currency?: string | null) =>
       }).format(value)
     : null;
 
-// Local + relative timestamp
-const formatWhen = (iso?: string | null) => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  const deltaMin = Math.round((Date.now() - d.getTime()) / 60000);
-  const rel =
-    deltaMin < 1 ? 'just now' :
-    deltaMin < 60 ? `${deltaMin} min ago` :
-    `${Math.round(deltaMin / 60)} hr ago`;
-  return `${d.toLocaleString()} (${rel})`;
+// Extract the canonical source URL from multiple places
+const getSourceUrl = (p: Product) =>
+  (p.detail?.specs?.sourceUrl as string | undefined) ??
+  (p.detail?.specs?.source_url as string | undefined) ??
+  p.sourceUrl ??
+  (p.detail?.specs?.url as string | undefined);
+
+// Pick the best available "last scraped" timestamp
+const getLastScrapedIso = (p: Product) =>
+  p.detail?.lastScrapedAt ??
+  (p.detail?.specs?.lastScrapedAtISO as string | undefined) ??
+  (p.detail as any)?.updatedAt ??
+  (p.detail as any)?.createdAt ??
+  null;
+
+// Reviews count is kept in specs.reviewsCount by the scraper
+const getReviewsCount = (p: Product) => {
+  const raw = p.detail?.specs && (p.detail.specs as any).reviewsCount;
+  return typeof raw === 'number' && isFinite(raw) ? raw : null;
 };
 
-export default function ProductClient({ product }: { product: Product }) {
-  // Back button: prefer saved list path; else history; else home
-  const handleBack = () => {
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
-    if (saved) window.location.href = saved;
-    else if (history.length > 1) history.back();
-    else window.location.href = '/';
-  };
+export default function ProductClient({ product: initial }: { product: Product }) {
+  const sp = useSearchParams();
+  const forced = (sp.get('refresh') || '').toLowerCase() === 'true';
 
+  // ---- live polling only when refresh=true ----
+  // We poll the plain endpoint *without* refresh=true (scrape is already triggered)
+  // with a short interval so the UI flips as soon as the DB has the new timestamp.
+  const { data: liveAfterRefresh } = useSWR<Product>(
+    forced ? `${API}/products/${initial.id}` : null,
+    fetcher,
+    {
+      revalidateOnFocus: false,
+      refreshInterval: forced ? 1500 : 0,     // poll while the query param is present
+      dedupingInterval: 500,                  // allow quick successive checks
+    }
+  );
+
+  // Prefer the “live” copy if it has a newer timestamp than the initial server render
+  const initialTs = getLastScrapedIso(initial);
+  const liveTs = liveAfterRefresh ? getLastScrapedIso(liveAfterRefresh) : null;
+  const useLive =
+    !!liveAfterRefresh &&
+    !!liveTs &&
+    !!initialTs &&
+    new Date(liveTs).getTime() > new Date(initialTs).getTime();
+
+  const product = useLive ? liveAfterRefresh! : initial;
+
+  // ---------------- UI derivations ----------------
   const price = money(product.price, product.currency);
+  const sourceUrl = getSourceUrl(product);
+  const lastIso = getLastScrapedIso(product);
 
-  // Canonical source URL (prefer JSON bag, then root)
-  const sourceUrl: string | undefined =
-    (product.detail?.specs?.sourceUrl as string | undefined) ??
-    (product.detail?.specs?.source_url as string | undefined) ??
-    product.sourceUrl ??
-    (product.detail?.specs?.url as string | undefined);
+  const ratingValue =
+    typeof product.detail?.ratingAverage === 'number'
+      ? product.detail!.ratingAverage!
+      : null;
+  const reviewsCount = getReviewsCount(product);
 
-  // Best available "last scraped" timestamp
-  const pickDate: string | null =
-    product.detail?.lastScrapedAt ??
-    (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??
-    (product.detail as any)?.updatedAt ??
-    (product.detail as any)?.createdAt ??
-    null;
+  const ratingStars =
+    ratingValue != null ? '★'.repeat(Math.min(5, Math.max(1, Math.round(ratingValue)))) : '';
 
-  // Related in same category
+  // Related list (same category)
   const relatedUrl = product.category?.id
     ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
     : null;
@@ -85,28 +111,15 @@ export default function ProductClient({ product }: { product: Product }) {
     revalidateOnFocus: false,
     keepPreviousData: true,
   });
-
   const relatedItems = (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
 
-  // Ratings bits (ratingAverage + specs.reviewsCount)
-  const ratingValue =
-    typeof product.detail?.ratingAverage === 'number' ? product.detail.ratingAverage : null;
-
-  const reviewsCountRaw =
-    product.detail?.specs &&
-    (
-      (product.detail.specs as any).reviewsCount ??        // our scraper key
-      (product.detail.specs as any).reviewCount ??         // fallback spelling
-      null
-    );
-
-  const reviewsCount =
-    typeof reviewsCountRaw === 'number' && isFinite(reviewsCountRaw) ? reviewsCountRaw : null;
-
-  const ratingStars =
-    ratingValue != null
-      ? '★'.repeat(Math.min(5, Math.max(1, Math.round(ratingValue))))
-      : '';
+  // Back button smarter behavior
+  const handleBack = () => {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
+    if (saved) window.location.href = saved;
+    else if (history.length > 1) history.back();
+    else window.location.href = '/';
+  };
 
   return (
     <>
@@ -137,40 +150,43 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            {/* IMPORTANT: keep prefetch off, and pass ?refresh=true to trigger a scrape server-side */}
+            {/* keep prefetch off; query param triggers the scrape */}
             <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
               Force refresh
             </Link>
+            {forced && !useLive && (
+              <span className="text-xs opacity-60 self-center">refreshing…</span>
+            )}
           </div>
 
-          {/* Meta panel: always visible (even if description is empty) */}
-          <div className="card p-4">
-            <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-            <div className="whitespace-pre-line leading-relaxed">
-              {product.detail?.description?.trim() || '—'}
+          {product?.detail?.description && (
+            <div className="card p-4">
+              <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
+              <div className="whitespace-pre-line leading-relaxed">
+                {product.detail.description}
+              </div>
+
+              <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-4 items-center">
+                <span>Last scraped: {lastIso ? new Date(lastIso).toLocaleString() : '—'}</span>
+
+                <span className="inline-flex items-center gap-1">
+                  Rating:
+                  {ratingValue != null ? (
+                    <>
+                      <span aria-hidden="true">{ratingStars || '★'}</span>
+                      {ratingValue.toFixed(1)} / 5
+                    </>
+                  ) : (
+                    ' Not available'
+                  )}
+                </span>
+
+                <span className="inline-flex items-center gap-1">
+                  Reviews: {reviewsCount != null ? reviewsCount : 'Not available'}
+                </span>
+              </div>
             </div>
-
-            <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-4 items-center">
-              <span>Last scraped: {formatWhen(pickDate)}</span>
-
-              <span className="inline-flex items-center gap-1">
-                Rating:
-                {ratingValue != null ? (
-                  <>
-                    <span aria-hidden="true">{ratingStars || '★'}</span>
-                    {ratingValue.toFixed(1)} / 5
-                  </>
-                ) : (
-                  ' Not available'
-                )}
-              </span>
-
-              <span className="inline-flex items-center gap-1">
-                Reviews:
-                {reviewsCount != null ? reviewsCount : ' Not available'}
-              </span>
-            </div>
-          </div>
+          )}
         </div>
       </section>
 
