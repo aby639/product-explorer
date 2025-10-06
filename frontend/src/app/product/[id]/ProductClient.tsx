@@ -16,14 +16,16 @@ type Product = {
   detail?: {
     description?: string | null;
     ratingAverage?: number | null;
-    lastScrapedAt?: string | null;
-    specs?: Record<string, any> | null;
+    lastScrapedAt?: string | null;   // DB timestamptz
+    specs?: Record<string, any> | null; // JSON bag (may mirror timestamp, review counts, etc.)
     updatedAt?: string | null;
     createdAt?: string | null;
   } | null;
 };
 
-type GridResponse = { items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>> };
+type GridResponse = {
+  items: Array<Pick<Product, 'id' | 'title' | 'image' | 'price' | 'currency'>>;
+};
 
 const fetcher = (url: string) =>
   fetch(url, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : Promise.reject(r)));
@@ -37,6 +39,7 @@ const money = (value?: number | null, currency?: string | null) =>
     : null;
 
 export default function ProductClient({ product }: { product: Product }) {
+  // Prefer saved last list path; else back; else home.
   const handleBack = () => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('lastListPath') : null;
     if (saved) window.location.href = saved;
@@ -46,12 +49,14 @@ export default function ProductClient({ product }: { product: Product }) {
 
   const price = money(product.price, product.currency);
 
+  // Canonical source URL (specs bag first, then root field).
   const sourceUrl: string | undefined =
     product.detail?.specs?.sourceUrl ??
     product.detail?.specs?.source_url ??
     product.sourceUrl ??
     (product.detail?.specs?.url as string | undefined);
 
+  // Best available "last scraped" timestamp.
   const pickDate =
     product.detail?.lastScrapedAt ??
     (product.detail?.specs?.lastScrapedAtISO as string | undefined) ??
@@ -59,6 +64,7 @@ export default function ProductClient({ product }: { product: Product }) {
     (product.detail as any)?.createdAt ??
     null;
 
+  // Related (same category).
   const relatedUrl = product.category?.id
     ? `${API}/products?category=${encodeURIComponent(product.category.id)}&limit=6`
     : null;
@@ -70,14 +76,26 @@ export default function ProductClient({ product }: { product: Product }) {
 
   const relatedItems = (related?.items ?? []).filter((p) => p.id !== product.id).slice(0, 6);
 
-  // rating to UI bits
-  const ratingValue = typeof product.detail?.ratingAverage === 'number' ? product.detail!.ratingAverage! : null;
-  const ratingCount = product.detail?.specs?.reviewCount as number | undefined;
-  const ratingStars = ratingValue != null ? '★'.repeat(Math.round(ratingValue)) : '';
+  // ---- Ratings UI bits ----
+  const ratingValue =
+    typeof product.detail?.ratingAverage === 'number' ? product.detail.ratingAverage : null;
+
+  // The scraper stores review count as specs.reviewsCount (note the "s")
+  const ratingCountRaw =
+    product.detail?.specs && typeof (product.detail.specs as any).reviewsCount !== 'undefined'
+      ? (product.detail.specs as any).reviewsCount
+      : null;
+  const ratingCount =
+    typeof ratingCountRaw === 'number' && isFinite(ratingCountRaw) ? ratingCountRaw : null;
+
+  const ratingStars =
+    ratingValue != null ? '★'.repeat(Math.min(5, Math.max(1, Math.round(ratingValue)))) : '';
 
   return (
     <>
-      <button onClick={handleBack} className="btn">← Back</button>
+      <button onClick={handleBack} className="btn">
+        ← Back
+      </button>
 
       <section className="grid gap-8 lg:grid-cols-2">
         <div className="card p-6 flex items-center justify-center">
@@ -91,6 +109,7 @@ export default function ProductClient({ product }: { product: Product }) {
 
         <div className="space-y-4">
           <h1 className="section-title">{product.title}</h1>
+
           {price ? (
             <div className="text-xl font-semibold">{price}</div>
           ) : (
@@ -103,7 +122,12 @@ export default function ProductClient({ product }: { product: Product }) {
                 View on World of Books
               </a>
             )}
-            <Link href={`/product/${product.id}?refresh=true`} prefetch={false} className="btn btn-ghost">
+            {/* Keep prefetch off; use the refresh query param so the backend triggers a scrape */}
+            <Link
+              href={`/product/${product.id}?refresh=true`}
+              prefetch={false}
+              className="btn btn-ghost"
+            >
               Force refresh
             </Link>
           </div>
@@ -111,20 +135,28 @@ export default function ProductClient({ product }: { product: Product }) {
           {product?.detail?.description && (
             <div className="card p-4">
               <div className="text-xs uppercase opacity-70 mb-2">Scraped description</div>
-              <div className="whitespace-pre-line leading-relaxed">
-                {product.detail.description}
-              </div>
-              <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-3 items-center">
-                <span>
-                  Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}
+              <div className="whitespace-pre-line leading-relaxed">{product.detail.description}</div>
+
+              {/* Meta row: last scraped + ratings (with N/A fallbacks) */}
+              <div className="mt-2 text-xs opacity-60 flex flex-wrap gap-4 items-center">
+                <span>Last scraped: {pickDate ? new Date(pickDate).toLocaleString() : '—'}</span>
+
+                <span className="inline-flex items-center gap-1">
+                  Rating:
+                  {ratingValue != null ? (
+                    <>
+                      <span aria-hidden="true">{ratingStars || '★'}</span>
+                      {ratingValue.toFixed(1)} / 5
+                    </>
+                  ) : (
+                    ' Not available'
+                  )}
                 </span>
-                {ratingValue != null && (
-                  <span title={`${ratingValue.toFixed(1)} / 5`}>
-                    <span aria-hidden="true" className="mr-1">{ratingStars || '★'}</span>
-                    {ratingValue.toFixed(1)} / 5
-                    {typeof ratingCount === 'number' && ratingCount >= 0 ? ` (${ratingCount})` : ''}
-                  </span>
-                )}
+
+                <span className="inline-flex items-center gap-1">
+                  Reviews:
+                  {ratingCount != null ? ratingCount : ' Not available'}
+                </span>
               </div>
             </div>
           )}
