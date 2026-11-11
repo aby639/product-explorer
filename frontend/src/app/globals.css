@@ -56,6 +56,15 @@
   .ring-card { @apply ring-1 ring-white/10; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+  .card-raise:hover, .group:hover img, img:hover { transform: none !important; }
+}
+
 /* ======= UTILITIES ======= */
 @layer utilities {
   .bg-canvas {

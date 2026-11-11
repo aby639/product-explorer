@@ -7,7 +7,9 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "build": "nest build -p tsconfig.build.json",
-    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright npx playwright install chromium",
+    "postinstall": "playwright install chromium",
+    "seed": "ts-node scripts/seed.ts",
+    "test": "npm run build && node --test test/regressions.test.cjs",
     "start:prod": "node dist/main.js"
   },
   "dependencies": {

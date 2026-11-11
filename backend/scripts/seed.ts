@@ -11,7 +11,7 @@ import {
 const ds = new DataSource({
   type: 'postgres',
   url: process.env.DATABASE_URL,
-  entities: ENTITIES,  // 👈 SAME list as App
+  entities: ENTITIES,
   synchronize: true,
   logging: false,
 });
@@ -97,15 +97,10 @@ async function run() {
 
     if (!existing) {
       await prodRepo.save(prodRepo.create(p));
-    } else {
-      existing.sourceUrl = p.sourceUrl!;
-      existing.price     = p.price!;
-      existing.currency  = p.currency!;
-      await prodRepo.save(existing);
     }
   }
 
-  console.log('Seeded! Go /categories/books → category → product → Force refresh');
+  console.log('Seed complete. Existing products were left unchanged.');
   await ds.destroy();
 }
 

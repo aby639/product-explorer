@@ -4,6 +4,7 @@ import {
   Param,
   ParseUUIDPipe,
   Query,
+  Post,
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { ListProductsQueryDto } from './dto/get-products.dto';
@@ -11,6 +12,11 @@ import { ListProductsQueryDto } from './dto/get-products.dto';
 @Controller('products')
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}
+
+  @Post(':id/refresh')
+  refresh(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) {
+    return this.products.getOneSafe(id, { refresh: true });
+  }
 
   /** List products (?category=fiction|non-fiction or UUID, ?page, ?limit) */
   @Get()
@@ -24,7 +30,7 @@ export class ProductsController {
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
     @Query('refresh') refresh?: string,
   ) {
-    const force = String(refresh).toLowerCase() === 'true';
+    const force = ['true', '1'].includes(String(refresh).toLowerCase());
     return this.products.getOneSafe(id, { refresh: force });
   }
 }

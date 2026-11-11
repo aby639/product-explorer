@@ -23,12 +23,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 
         <Providers>
           <header className="sticky top-0 z-20 border-b border-white/10 backdrop-blur supports-[backdrop-filter]:bg-black/30">
-            <div className="container-xl flex items-center justify-between py-3">
+            <div className="container-xl flex flex-wrap items-center justify-between gap-2 py-3">
               <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight no-underline">
                 <img src="/pe-logo.svg" alt="" className="h-6 w-6 rounded-xl ring-1 ring-emerald-400/30" />
                 <span className="hover:opacity-90">Product Explorer</span>
               </Link>
-              <nav className="flex items-center gap-2 text-sm">
+              <nav aria-label="Main navigation" className="flex items-center gap-2 text-sm">
                 <Link className="btn btn-ghost" href="/categories/books">Books</Link>
                 <Link className="btn btn-ghost" href="/about">About</Link>
               </nav>
@@ -41,11 +41,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <div className="container-xl py-8 text-xs opacity-70">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>© {new Date().getFullYear()} Product Explorer</div>
-                <div className="flex items-center gap-3">
-                  <span className="badge">Next.js</span>
-                  <span className="badge">NestJS</span>
-                  <span className="badge">PostgreSQL</span>
-                </div>
+                <a href="https://github.com/aby639/product-explorer">Source code</a>
               </div>
             </div>
           </footer>

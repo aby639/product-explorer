@@ -27,7 +27,7 @@ import { ViewsModule } from './views/views.module';
     }),
 
     // Light rate limiting (per IP): 120 requests per minute
-    ThrottlerModule.forRoot([{ ttl: 60, limit: 120 }]),
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
 
     // Feature modules
     NavigationModule,

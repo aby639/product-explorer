@@ -3,9 +3,10 @@ export default function About() {
     <div className="space-y-6">
       <h1 className="section-title">About</h1>
       <div className="card p-5 leading-relaxed opacity-90">
-        Product Explorer scrapes live data from <span className="font-medium">World of Books</span> on demand
-        and caches it for a short period to be polite to the source. Built with <span className="badge">Next.js</span>,{' '}
-        <span className="badge">NestJS</span>, and <span className="badge">PostgreSQL</span>.
+        Product Explorer is a book-browsing project using data from World of Books.
+        It saves prices, descriptions and cover images when the source page provides them.
+        Open a book and select Refresh details to check for an update.
+        Saved prices may differ from the source website, and ratings are not always available.
       </div>
     </div>
   );

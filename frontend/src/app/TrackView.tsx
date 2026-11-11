@@ -37,11 +37,11 @@ export default function TrackView() {
     const path = pathname ?? '/';
     if (lastSent.current === path) return;
 
-    let sid = window.localStorage.getItem('sid');
-    if (!sid) {
-      sid = makeSid();
+    let sid: string;
+    try {
+      sid = window.localStorage.getItem('sid') || makeSid();
       window.localStorage.setItem('sid', sid);
-    }
+    } catch { return; }
 
     lastSent.current = path;
 

@@ -1,52 +1,18 @@
+import Link from 'next/link';
 import ProductClient from './ProductClient';
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
-
+import { API, fetchJson, type Product } from '../../../lib/products';
 export const dynamic = 'force-dynamic';
 
-type Product = {
-  id: string;
-  title: string;
-  image?: string | null;
-  price?: number | null;
-  currency?: string | null;
-  category?: { id: string; title: string; slug?: string | null } | null;
-  detail?: {
-    description?: string | null;
-    ratingAverage?: number | null;
-    lastScrapedAt?: string | null;
-    specs?: Record<string, any> | null;
-  } | null;
-  /** some seeds store this at the root; keep it optional */
-  sourceUrl?: string | null;
-};
-
-async function getProduct(id: string, refresh: boolean) {
-  const url = `${API}/products/${id}${refresh ? '?refresh=true' : ''}`;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) return null;
-  return (await res.json()) as Product;
-}
-
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { id: string };
-  searchParams?: { refresh?: string };
-}) {
-  const product = await getProduct(params.id, (searchParams?.refresh ?? '').toLowerCase() === 'true');
-
-  return (
-    <main className="container-xl py-8 space-y-6">
-      {product ? (
-        <ProductClient product={product} />
-      ) : (
-        <div className="card p-6">
-          <div className="text-lg font-semibold">Couldn’t load this product right now.</div>
-          <p className="opacity-70 mt-1">Please try again in a moment or go back and pick another one.</p>
-        </div>
-      )}
-    </main>
+export default async function Page({ params }: { params: { id: string } }) {
+  let product: Product | null = null;
+  try { product = await fetchJson<Product>(`${API}/products/${encodeURIComponent(params.id)}`); }
+  catch { /* Keep navigation available when the API is offline or the book is missing. */ }
+  return product ? <ProductClient key={product.id} product={product} /> : (
+    <div className="card p-6 space-y-3">
+      <h1 className="text-lg font-semibold">Could not load this book.</h1>
+      <p>It may no longer be available, or the server may be offline.</p>
+      <a className="btn" href={`/product/${encodeURIComponent(params.id)}`}>Try again</a>
+      <Link className="btn" href="/categories/books">Back to categories</Link>
+    </div>
   );
 }

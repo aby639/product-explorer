@@ -2,104 +2,27 @@
 
 import useSWR from 'swr';
 import Link from 'next/link';
-import { useMemo } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
-const fetcher = (url: string) => fetch(url).then(r => r.json());
-
-type Product = { id?: string; title: string; image?: string | null };
-
-// Fallback covers from WoB CDN — only used if API returns too few
-const FALLBACKS: Product[] = [
-  { title: 'The Midnight Library', image: 'https://images.worldofbooks.com/m/3551232.jpg' },
-  { title: 'Normal People',        image: 'https://images.worldofbooks.com/m/3575201.jpg' },
-  { title: 'Then She Was Gone',    image: 'https://images.worldofbooks.com/m/3582681.jpg' },
-  { title: 'Evelyn Hugo',          image: 'https://images.worldofbooks.com/m/3550035.jpg' },
-  { title: 'Before the Coffee…',   image: 'https://images.worldofbooks.com/m/3869133.jpg' },
-];
-
-function uniqBy<T>(arr: T[], key: (x: T) => string) {
-  const m = new Map<string, T>();
-  for (const it of arr) {
-    const k = key(it);
-    if (!m.has(k)) m.set(k, it);
-  }
-  return [...m.values()];
-}
+import BookImage from './BookImage';
+import { API, fetchJson, type GridResponse } from '../../lib/products';
 
 export default function HeroShowcase() {
-  // Pull a handful from both categories
-  const { data: f } = useSWR(`${API}/products?category=fiction&limit=8`, fetcher);
-  const { data: n } = useSWR(`${API}/products?category=non-fiction&limit=8`, fetcher);
-
-  const fromApi: Product[] = useMemo(() => {
-    const a: Product[] = [
-      ...(f?.items ?? []),
-      ...(n?.items ?? []),
-    ].map((p: any) => ({ id: p.id, title: p.title, image: p.image }));
-
-    // de-dupe by title, cap to 8
-    return uniqBy(a, x => (x.title ?? '').toLowerCase()).slice(0, 8);
-  }, [f, n]);
-
-  const covers: Product[] = (fromApi.length >= 5 ? fromApi : [...fromApi, ...FALLBACKS]).slice(0, 8);
-
-  return (
-    <div className="card p-6">
-      {/* Cover rail */}
-      <div className="rounded-xl bg-slate-900/60 p-4 ring-1 ring-white/10">
-        <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory px-1 py-2 mask-fade-x">
-          {covers.map((c, i) => (
-            <div
-              key={(c.id ?? c.title) + i}
-              className="snap-start shrink-0 w-44 h-64 rounded-xl bg-slate-950/40 ring-1 ring-white/10 overflow-hidden flex items-center justify-center"
-              title={c.title}
-            >
-              {c.image ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={c.image}
-                  alt={c.title}
-                  loading="lazy"
-                  className="h-full w-full object-contain transition-transform duration-300 hover:scale-[1.02]"
-                />
-              ) : (
-                <div className="h-full w-full bg-white/5" />
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Bottom row: CTA + quick facts */}
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Link
-          href="/categories/books"
-          className="tile p-4 border-emerald-400/20 bg-emerald-400/10 hover:bg-emerald-400/15"
-        >
-          <div className="text-xs uppercase tracking-wide opacity-70">Jump in</div>
-          <div className="mt-1 font-semibold">Discover bestsellers →</div>
-          <div className="mt-1 text-sm opacity-80">
-            Browse fiction & non-fiction with prices and live details.
-          </div>
-        </Link>
-
-        <div className="tile p-4">
-          <div className="text-xs uppercase tracking-wide opacity-70">Fresh scrape</div>
-          <div className="mt-1 font-semibold">Up-to-date details</div>
-          <div className="mt-1 text-sm opacity-80">
-            Force refresh any product to pull the newest info.
-          </div>
-        </div>
-
-        <div className="tile p-4">
-          <div className="text-xs uppercase tracking-wide opacity-70">Nice & polite</div>
-          <div className="mt-1 font-semibold">Short-term caching</div>
-          <div className="mt-1 text-sm opacity-80">
-            We keep load light on the source while you browse.
-          </div>
-        </div>
-      </div>
-    </div>
+  const { data, error, isLoading } = useSWR<GridResponse>(
+    `${API}/products?limit=8`, fetchJson, { revalidateOnFocus: false },
   );
+  return <div className="card p-6 min-w-0 space-y-4">
+    <h2 className="text-lg font-semibold">From the catalogue</h2>
+    {isLoading ? <p role="status">Loading books…</p> : error ? (
+      <p className="text-slate-300">Book previews could not be loaded.</p>
+    ) : data?.items.length ? (
+      <ul aria-label="Book previews" className="flex gap-4 overflow-x-auto snap-x snap-mandatory p-1">
+        {data.items.map(book => <li key={book.id} className="snap-start shrink-0 w-36">
+          <Link href={`/product/${book.id}`} className="block rounded-xl focus-visible:outline focus-visible:outline-emerald-400">
+            <BookImage src={book.image} title={book.title} className="h-52 w-full rounded-xl bg-slate-900/60 object-contain" />
+            <span className="mt-2 block text-sm line-clamp-2">{book.title}</span>
+          </Link>
+        </li>)}
+      </ul>
+    ) : <p className="text-slate-300">No books are available yet.</p>}
+    <Link href="/categories/books" className="btn">View categories →</Link>
+  </div>;
 }

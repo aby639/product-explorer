@@ -27,7 +27,7 @@ export default function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={client}>
       {children}
-      <Devtools initialIsOpen={false} />
+      {process.env.NODE_ENV === 'development' && <Devtools initialIsOpen={false} />}
     </QueryClientProvider>
   );
 }

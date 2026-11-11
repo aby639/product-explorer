@@ -90,11 +90,6 @@ export class NavigationService implements OnModuleInit {
 
       if (!existing) {
         await this.prodRepo.save(this.prodRepo.create(p));
-      } else {
-        existing.sourceUrl = p.sourceUrl!;
-        existing.price     = p.price!;
-        existing.currency  = p.currency!;
-        await this.prodRepo.save(existing);
       }
     }
   }

@@ -462,8 +462,15 @@ export class ScraperService {
     const last = this.lastAttempt.get(productId) ?? 0;
 
     if (this.inFlight.has(productId)) return this.inFlight.get(productId)!;
-    if (now - last < this.ATTEMPT_COOLDOWN_MS && this.inFlight.has(productId)) {
-      return this.inFlight.get(productId)!;
+    if (now - last < this.ATTEMPT_COOLDOWN_MS) {
+      const saved = await this.details.findOne({ where: { product: { id: productId } } });
+      if (saved) return saved;
+      throw new Error('Please wait before trying another refresh.');
+    }
+    for (const [id, attemptedAt] of this.lastAttempt) {
+      if (now - attemptedAt >= this.ATTEMPT_COOLDOWN_MS && !this.inFlight.has(id)) {
+        this.lastAttempt.delete(id);
+      }
     }
     this.lastAttempt.set(productId, now);
 
@@ -477,7 +484,6 @@ export class ScraperService {
     if (!product?.sourceUrl) throw new Error('Product has no sourceUrl');
 
     product.sourceUrl = toHttps(product.sourceUrl);
-    await this.products.save(product).catch(() => undefined);
 
     this.log.log(`[ScraperService] Scraping ${product.sourceUrl}`);
 
@@ -521,6 +527,9 @@ export class ScraperService {
 
       const resp = await gotoWithRetry(page, product.sourceUrl!);
       status = resp?.status?.() ?? null;
+      if (status == null || status >= 400) {
+        throw new Error(`Source page could not be loaded (${status ?? 'no response'}).`);
+      }
 
       // cookie banners (best effort)
       await page
@@ -564,6 +573,9 @@ export class ScraperService {
         `currency=${currencyDetected ?? 'na'} unavailable=${unavailable} rating=${ratingAverage ?? 'na'} ` +
         `reviews=${ratingCount ?? 'na'} probes=${priceProbes.join(',')}`,
     );
+
+    // Keep the last successful result when navigation or extraction fails.
+    if (scrapeError) throw scrapeError;
 
     // ---------- persist ----------
     let changedProduct = false;
@@ -634,7 +646,6 @@ export class ScraperService {
 
     this.log.log(`Saved detail for ${product.id}`);
 
-    if (scrapeError) throw scrapeError;
     return saved;
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike, In } from 'typeorm';
 import { Product } from '../entities/product.entity';
@@ -43,13 +43,16 @@ export class ProductsService {
       }
     }
 
+    if (categoryIds && categoryIds.length === 0) {
+      return { items: [], total: 0, page, limit };
+    }
+
     const [items, total] = await this.products.findAndCount({
       where: categoryIds?.length ? { category: { id: In(categoryIds) } } : {},
       relations: { category: true }, // detail is eager on Product
       order: { id: 'ASC' },
       take: limit,
       skip: (page - 1) * limit,
-      // (we can safely select main fields for list view)
       select: {
         id: true,
         title: true,
@@ -64,10 +67,9 @@ export class ProductsService {
   }
 
   async getOneSafe(id: string, opts?: { refresh?: boolean }) {
-    // Always ensure it exists first (and loads relations)
     const exists = await this.products.findOne({
       where: { id },
-      relations: { category: true, detail: true }, // detail eager anyway, but explicit is fine
+      relations: { category: true, detail: true },
     });
     if (!exists) throw new NotFoundException('Product not found');
 
@@ -75,11 +77,12 @@ export class ProductsService {
       try {
         await this.scraper.refreshProduct(id);
       } catch {
-        // swallow scrape errors so the page still renders stale data
+        throw new ServiceUnavailableException('Could not refresh this product. Saved details have been kept.');
       }
     }
 
-    // Return full entity (NO custom select) so lastScrapedAt/specs can flow through
+    if (!opts?.refresh) return exists;
+
     const withDetail = await this.products.findOne({
       where: { id },
       relations: { category: true, detail: true },
